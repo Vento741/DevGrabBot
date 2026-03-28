@@ -23,6 +23,7 @@ from src.core.models import (
     TeamRole,
 )
 from src.core.settings_service import get_setting, set_setting
+from src.bot.services.broadcast import broadcast_to_team
 from src.bot.states import ManagerPanelStates
 from src.bot.keyboards.manager_panel import (
     back_to_manager_kb,
@@ -105,6 +106,7 @@ async def handle_mgr_toggle_available(
     callback: CallbackQuery,
     redis_client: RedisClient,
     settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Переключить доступность PM (пауза/возобновление парсера)."""
     is_paused = await redis_client.is_parser_paused()
@@ -120,14 +122,15 @@ async def handle_mgr_toggle_available(
         group_msg = "\u23f8 PM не готов отправлять отклики, парсер остановлен \u2615"
         alert_text = "Парсер приостановлен"
 
-    # Сообщение в группу
+    # Рассылка всей команде
     try:
-        await callback.bot.send_message(  # type: ignore[union-attr]
-            chat_id=settings.group_chat_id,
-            text=group_msg,
+        await broadcast_to_team(
+            callback.bot,  # type: ignore[arg-type]
+            session_factory,
+            group_msg,
         )
     except Exception:
-        logger.warning("Не удалось отправить сообщение о паузе в группу")
+        logger.warning("Не удалось разослать сообщение о паузе команде")
 
     await callback.answer(alert_text, show_alert=True)
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -402,12 +405,16 @@ async def handle_resp_mark_sent(
         external_id = order.external_id
         response_price = order.response_price
 
-    # Уведомление в группу
+    # Рассылка команде
     price_str = f" ({response_price} руб.)" if response_price else ""
-    await callback.bot.send_message(  # type: ignore[union-attr]
-        chat_id=settings.group_chat_id,
-        text=f"Отклик по заявке <b>{external_id}</b> отправлен клиенту{price_str}",
-    )
+    try:
+        await broadcast_to_team(
+            callback.bot,  # type: ignore[arg-type]
+            session_factory,
+            f"Отклик по заявке <b>{external_id}</b> отправлен клиенту{price_str}",
+        )
+    except Exception:
+        logger.warning("Не удалось разослать уведомление об отклике")
 
     await callback.message.answer(  # type: ignore[union-attr]
         "Отклик отмечен как отправленный клиенту.",
