@@ -1,4 +1,4 @@
-"""Обработчики заявок в групповом чате."""
+"""Обработчики заявок (DM-уведомления)."""
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -14,12 +14,13 @@ from src.core.models import (
     AssignmentStatus,
     Order,
     OrderAssignment,
+    OrderNotification,
     OrderStatus,
     TeamMember,
     TeamRole,
 )
 from src.ai.context import OrderContext
-from src.bot.keyboards.orders import order_actions_kb, order_taken_kb
+from src.bot.keyboards.orders import order_actions_kb
 from src.bot.keyboards.review import review_actions_kb
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ async def handle_take_order(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> None:
-    """Разработчик берёт заявку из группового чата."""
+    """Разработчик берёт заявку из личного сообщения."""
     await callback.answer()
     order_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
     user = callback.from_user
@@ -126,14 +127,13 @@ async def handle_take_order(
             )
             return
 
-        # Только разработчики могут брать заявки
         if member.role != TeamRole.developer:
             await callback.answer(
                 "Только разработчики могут брать заявки.", show_alert=True,
             )
             return
 
-        # Проверяем, что заявка ещё не взята (+ загружаем анализ одним запросом)
+        # Проверяем, что заявка ещё не взята
         order_result = await session.execute(
             select(Order)
             .options(
@@ -162,56 +162,60 @@ async def handle_take_order(
             price_final=analysis.price_max if analysis else None,
             timeline_final=analysis.timeline_days if analysis else None,
             stack_final=analysis.stack if analysis else None,
-            group_message_id=callback.message.message_id if callback.message else None,
         )
         session.add(assignment)
         order.status = OrderStatus.assigned
         await session.commit()
         await session.refresh(assignment)
 
-        # DM-уведомление только админу (в группе и так видно кто взял)
-        other_devs_result = await session.execute(
-            select(TeamMember).where(
-                TeamMember.is_active.is_(True),
-                TeamMember.tg_id == settings.admin_tg_id,
-                TeamMember.tg_id != user.id,
+        # Тихо убираем кнопки у других dev'ов, получивших эту заявку
+        notifs_result = await session.execute(
+            select(OrderNotification).where(
+                OrderNotification.order_id == order_id,
+                OrderNotification.is_active.is_(True),
             )
         )
-        other_devs = list(other_devs_result.scalars().all())
+        notifications = list(notifs_result.scalars().all())
+
+        for notif in notifications:
+            if notif.developer_id == member.id:
+                notif.is_active = False
+                continue
+            # Убираем кнопки у другого dev'а
+            try:
+                dev_result = await session.execute(
+                    select(TeamMember).where(TeamMember.id == notif.developer_id)
+                )
+                other_dev = dev_result.scalar_one_or_none()
+                if other_dev:
+                    await callback.bot.edit_message_reply_markup(  # type: ignore[union-attr]
+                        chat_id=other_dev.tg_id,
+                        message_id=notif.message_id,
+                        reply_markup=None,
+                    )
+            except Exception:
+                logger.warning("Не удалось убрать кнопки у dev_id=%s", notif.developer_id)
+            notif.is_active = False
+
+        await session.commit()
 
         logger.info(
             "Заявка #%s взята разработчиком %s (tg_id=%s)",
             order.external_id, member.name, user.id,
         )
 
-    # Обновляем сообщение в группе: добавляем время взятия (МСК), меняем кнопки
+    # Обновляем сообщение в личке dev'а: убираем кнопки, добавляем "Взята"
     msk = timezone(timedelta(hours=3))
     taken_time = datetime.now(msk).strftime("%H:%M %d.%m.%Y")
-    dev_display = f"@{user.username}" if user.username else user.full_name
     await callback.message.edit_text(  # type: ignore[union-attr]
         text=(
             callback.message.text  # type: ignore[union-attr]
-            + f"\n\n<b>Взята:</b> {taken_time}"
+            + f"\n\n<b>Взята вами:</b> {taken_time}"
         ),
-        reply_markup=order_taken_kb(order_id, order.external_id, dev_display),
+        reply_markup=None,
     )
 
-    # Уведомляем других разработчиков о взятии заявки
-    taken_time_short = datetime.now(msk).strftime("%H:%M")
-    notify_text = (
-        f"Заявка <b>{order.external_id}</b> — «{order.title}» "
-        f"взята {dev_display} в {taken_time_short}"
-    )
-    for dev in other_devs:
-        try:
-            await callback.bot.send_message(  # type: ignore[union-attr]
-                chat_id=dev.tg_id,
-                text=notify_text,
-            )
-        except Exception:
-            logger.warning("Не удалось уведомить %s (tg_id=%s)", dev.name, dev.tg_id)
-
-    # Формируем сообщение в личку разработчику
+    # Формируем сообщение-ревью в личку разработчику
     if analysis:
         ctx = OrderContext.from_order_data(order, analysis)
         stack_str = ", ".join(ctx.stack) if ctx.stack else "—"
@@ -264,19 +268,24 @@ async def handle_skip_order(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Пропуск заявки (отметка как skipped)."""
+    """Dev пропускает заявку — убираем кнопки только из его сообщения."""
     await callback.answer("Заявка пропущена.")
     order_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
 
     async with session_factory() as session:
-        order_result = await session.execute(
-            select(Order).where(Order.id == order_id)
+        # Помечаем уведомление как неактивное
+        result = await session.execute(
+            select(OrderNotification).where(
+                OrderNotification.order_id == order_id,
+                OrderNotification.message_id == callback.message.message_id,
+            )
         )
-        order = order_result.scalar_one_or_none()
-        if order and order.status not in (OrderStatus.assigned, OrderStatus.completed):
-            order.status = OrderStatus.skipped
+        notif = result.scalar_one_or_none()
+        if notif:
+            notif.is_active = False
             await session.commit()
 
+    # Убираем кнопки из сообщения dev'а
     await callback.message.edit_text(  # type: ignore[union-attr]
         text=(
             callback.message.text  # type: ignore[union-attr]
