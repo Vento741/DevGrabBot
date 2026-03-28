@@ -15,6 +15,7 @@ from src.core.database import create_engine, create_session_factory
 from src.core.models import AssignmentStatus, OrderAssignment
 from src.core.settings_service import get_config_setting
 from src.bot.services.analytics import get_daily_broadcast_text
+from src.bot.services.broadcast import broadcast_to_team
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,8 @@ async def run_scheduler_worker(settings: Settings) -> None:
                     text = await get_daily_broadcast_text(session)
 
                 if text:
-                    await bot.send_message(
-                        chat_id=settings.group_chat_id,
-                        text=text,
-                    )
-                    logger.info("Ежедневная статистика отправлена в группу")
+                    await broadcast_to_team(bot, session_factory, text)
+                    logger.info("Ежедневная статистика отправлена команде")
                 else:
                     logger.info("За сегодня активности нет — статистика не отправлена")
             except Exception:
