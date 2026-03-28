@@ -1,4 +1,4 @@
-"""Воркер уведомлений: забирает проанализированные заявки из Redis и отправляет в группу."""
+"""Воркер уведомлений: забирает проанализированные заявки из Redis и отправляет dev'ам в личку."""
 import asyncio
 import logging
 import time
@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from src.core.config import Settings
 from src.core.database import create_engine, create_session_factory
-from src.core.models import TeamMember, TeamRole
+from src.core.models import TeamMember, TeamRole, Order, OrderNotification, OrderStatus
 from src.core.redis import RedisClient
 from src.bot.handlers.orders import format_price_range, relevance_bar
 from src.bot.services.matching import format_matches_block, match_developers
@@ -229,13 +229,14 @@ async def _load_active_developers(session_factory) -> list:
 
 
 async def run_notification_worker(settings: Settings):
-    """Бесконечный цикл: Redis (analyzed) → TG-группа.
+    """Бесконечный цикл: Redis (analyzed) → DM каждому подходящему dev'у.
 
     При каждой заявке:
     1. Загружает активных разработчиков из БД.
     2. Вычисляет матчинг по стеку.
-    3. Формирует уведомление с блоком «Подходящие разработчики».
-    4. Отправляет в групповой чат.
+    3. Отправляет уведомление каждому совпавшему dev'у в личку.
+    4. Сохраняет OrderNotification для трекинга message_id.
+    5. Если нет совпадений — авто-пропуск (status=skipped).
     """
     redis = RedisClient(settings)
     bot = Bot(
@@ -245,7 +246,7 @@ async def run_notification_worker(settings: Settings):
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
 
-    logger.info("Notification worker запущен")
+    logger.info("Notification worker запущен (DM mode)")
 
     try:
         while True:
@@ -268,20 +269,60 @@ async def run_notification_worker(settings: Settings):
                     except Exception:
                         logger.exception("Не удалось загрузить разработчиков для матчинга")
 
-                text = format_order_notification(data, matches=matches if matches else None)
+                if not matches:
+                    # Нет совпадений — авто-пропуск
+                    async with session_factory() as session:
+                        order_result = await session.execute(
+                            select(Order).where(Order.id == order_id)
+                        )
+                        order = order_result.scalar_one_or_none()
+                        if order:
+                            order.status = OrderStatus.skipped
+                            await session.commit()
+                    logger.info("Заявка #%s — нет матчей, авто-пропуск", external_id)
+                    continue
+
                 has_materials = bool(data.get("materials"))
                 keyboard = order_actions_keyboard(order_id, external_id, has_materials=has_materials)
 
-                await bot.send_message(
-                    chat_id=settings.group_chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                )
-                logger.info(f"Заявка #{external_id} отправлена в группу")
-                await asyncio.sleep(5)
+                # Отправляем каждому совпавшему dev'у в личку
+                sent_count = 0
+                async with session_factory() as session:
+                    for dev, score, matched_techs in matches:
+                        if not getattr(dev, "notify_assignments", True):
+                            continue
+
+                        # Персональный текст с инфой о матче
+                        match_info = f"\n<b>Совпадение:</b> {', '.join(matched_techs)} — {score}%\n"
+                        text = format_order_notification(data) + match_info
+
+                        try:
+                            msg = await bot.send_message(
+                                chat_id=dev.tg_id,
+                                text=text,
+                                reply_markup=keyboard,
+                            )
+                            # Сохраняем трекинг уведомления
+                            notification = OrderNotification(
+                                order_id=order_id,
+                                developer_id=dev.id,
+                                message_id=msg.message_id,
+                            )
+                            session.add(notification)
+                            sent_count += 1
+                        except Exception:
+                            logger.warning(
+                                "Не удалось отправить заявку #%s dev'у %s (tg_id=%s)",
+                                external_id, dev.name, dev.tg_id,
+                            )
+
+                    await session.commit()
+
+                logger.info("Заявка #%s отправлена %d dev'ам в личку", external_id, sent_count)
+                await asyncio.sleep(2)
 
             except Exception:
-                logger.exception(f"Ошибка отправки заявки #{external_id} в группу")
+                logger.exception("Ошибка отправки заявки #%s", external_id)
 
     finally:
         await redis.close()
