@@ -61,6 +61,9 @@ class Order(Base):
 
     analyses: Mapped[list["AiAnalysis"]] = relationship(back_populates="order")
     assignments: Mapped[list["OrderAssignment"]] = relationship(back_populates="order")
+    notifications: Mapped[list["OrderNotification"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan",
+    )
 
 
 class AiAnalysis(Base):
@@ -116,6 +119,23 @@ class OrderAssignment(Base):
     manager_response: Mapped["ManagerResponse | None"] = relationship(
         back_populates="assignment", uselist=False,
     )
+
+
+class OrderNotification(Base):
+    """Трекинг уведомлений о заказах, отправленных dev'ам в личку."""
+    __tablename__ = "order_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
+    developer_id: Mapped[int] = mapped_column(ForeignKey("team_members.id"))
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(),
+    )
+
+    order: Mapped["Order"] = relationship(back_populates="notifications")
+    developer: Mapped["TeamMember"] = relationship()
 
 
 class ManagerResponse(Base):
