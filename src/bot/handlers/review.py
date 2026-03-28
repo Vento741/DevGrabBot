@@ -17,6 +17,7 @@ from src.core.models import (
     ManagerResponse,
     Order,
     OrderAssignment,
+    OrderNotification,
     OrderStatus,
     TeamMember,
     TeamRole,
@@ -793,10 +794,11 @@ async def handle_reject_order(
     settings: Settings,
     bot: Bot,
 ) -> None:
-    """Разработчик отказывается от заявки: удаляем assignment, освобождаем заявку в группе."""
+    """Разработчик отказывается от заявки: удаляем assignment, восстанавливаем кнопки в DM."""
     await callback.answer()
     assignment_id = int(callback.data.split(":")[1])  # type: ignore[union-attr]
 
+    notif = None
     async with session_factory() as session:
         assignment = await _get_assignment_minimal(session, assignment_id)
         if not assignment:
@@ -804,15 +806,26 @@ async def handle_reject_order(
             return
 
         order = assignment.order
-        group_message_id = assignment.group_message_id
         order_external_id = order.external_id
         order_id = order.id
+        developer_id = assignment.developer_id
 
         # Удаляем assignment из БД
         await session.delete(assignment)
-        # Возвращаем статус заказа — можно снова брать
         order.status = OrderStatus.reviewed
         await session.commit()
+
+        # Восстанавливаем кнопки в DM этого dev'а
+        notif_result = await session.execute(
+            select(OrderNotification).where(
+                OrderNotification.order_id == order_id,
+                OrderNotification.developer_id == developer_id,
+            )
+        )
+        notif = notif_result.scalar_one_or_none()
+        if notif:
+            notif.is_active = True
+            await session.commit()
 
         logger.info(
             "Разработчик отказался от заявки #%s (assignment_id=%s)",
@@ -822,20 +835,21 @@ async def handle_reject_order(
     # Обновляем сообщение в личке разработчика
     await callback.message.edit_text(  # type: ignore[union-attr]
         f"Вы отказались от заявки <b>{order_external_id}</b>.\n"
-        "Заявка снова доступна для взятия в группе.",
+        "Заявка снова доступна.",
         reply_markup=None,
     )
 
-    # Обновляем сообщение в группе: возвращаем кнопки «Взять / Пропустить»
-    if group_message_id:
+    # Восстанавливаем кнопки в DM-уведомлении этого dev'а
+    if notif:
         try:
+            has_materials = False
             await bot.edit_message_reply_markup(
-                chat_id=settings.group_chat_id,
-                message_id=group_message_id,
-                reply_markup=order_actions_keyboard(order_id, order_external_id),
+                chat_id=callback.from_user.id,
+                message_id=notif.message_id,
+                reply_markup=order_actions_keyboard(order_id, order_external_id, has_materials),
             )
-        except TelegramAPIError:
+        except Exception:
             logger.warning(
-                "Не удалось обновить сообщение в группе для заявки #%s",
+                "Не удалось восстановить кнопки DM для заявки #%s",
                 order_external_id,
             )
