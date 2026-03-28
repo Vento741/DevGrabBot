@@ -9,3 +9,5 @@ venv/
 logs/
 pm-workspace/
 config
+CLAUDE.md
+.claude/
