@@ -11,3 +11,6 @@ pm-workspace/
 config
 CLAUDE.md
 .claude/
+scripts/systemd/
+*.jpg
+*.png
