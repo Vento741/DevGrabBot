@@ -70,10 +70,9 @@ async def send_to_manager(
         )
         manager = mgr_result.scalar_one_or_none()
         if not manager:
-            logger.warning("Активный менеджер не найден, отправляем в групповой чат")
-            chat_id = settings.group_chat_id
-        else:
-            chat_id = manager.tg_id
+            logger.error("Активный менеджер не найден — отклик не отправлен")
+            return
+        chat_id = manager.tg_id
 
         # Формируем сообщение
         stack_str = ", ".join(assignment.stack_final) if assignment.stack_final else "—"
