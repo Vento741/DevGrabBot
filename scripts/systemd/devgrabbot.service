@@ -1,0 +1,18 @@
+[Unit]
+Description=DevGrabBot - Telegram бот + AI-ассистент для фриланс-заявок
+After=network.target postgresql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/BOTS/DevGrabBot
+ExecStart=/usr/bin/python3 -m src.bot.main
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/var/www/BOTS/DevGrabBot/.env
+
+[Install]
+WantedBy=multi-user.target

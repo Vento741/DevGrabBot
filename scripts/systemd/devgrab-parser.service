@@ -1,0 +1,17 @@
+[Unit]
+Description=DevGrabBot Parser - Парсер заказов Профи.ру
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/BOTS/DevGrabBot
+ExecStart=/usr/bin/python3 -m src.parser.worker
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/var/www/BOTS/DevGrabBot/.env
+
+[Install]
+WantedBy=multi-user.target
