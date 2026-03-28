@@ -13,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 class AlertService:
-    """Отправка алертов парсера в Telegram.
+    """Отправка алертов парсера в Telegram (всем участникам команды).
 
     Args:
         bot_token: токен Telegram бота
-        chat_id: ID чата для алертов (GROUP_CHAT_ID)
+        chat_ids: список ID чатов для алертов
         dedup_sec: минимальный интервал между одинаковыми алертами
     """
 
@@ -27,12 +27,12 @@ class AlertService:
     def __init__(
         self,
         bot_token: str,
-        chat_id: int,
+        chat_ids: list[int],
         dedup_sec: int = 900,
     ) -> None:
-        self._chat_id = chat_id
+        self._chat_ids = chat_ids
         self._dedup_sec = dedup_sec
-        self._last_sent: dict[str, float] = {}  # alert_key → timestamp
+        self._last_sent: dict[str, float] = {}
         self._send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self._http = httpx.AsyncClient(timeout=10.0)
 
@@ -81,23 +81,27 @@ class AlertService:
             logger.debug("Алерт '%s' дедуплицирован (осталось %.0f сек)", key, self._dedup_sec - (now - last))
             return
 
-        try:
-            resp = await self._http.post(self._send_url, json={
-                "chat_id": self._chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-            })
-            if resp.status_code == 200:
-                self._last_sent[key] = now
-                # Ограничиваем размер кэша дедупликации
-                if len(self._last_sent) > self._MAX_DEDUP_KEYS:
-                    oldest_key = min(self._last_sent, key=self._last_sent.get)
-                    del self._last_sent[oldest_key]
-                logger.info("Алерт '%s' отправлен", key)
-            else:
-                logger.warning("Не удалось отправить алерт '%s': %d", key, resp.status_code)
-        except Exception:
-            logger.exception("Ошибка отправки алерта '%s'", key)
+        sent = False
+        for chat_id in self._chat_ids:
+            try:
+                resp = await self._http.post(self._send_url, json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                })
+                if resp.status_code == 200:
+                    sent = True
+                else:
+                    logger.warning("Не удалось отправить алерт '%s' в chat %s: %d", key, chat_id, resp.status_code)
+            except Exception:
+                logger.exception("Ошибка отправки алерта '%s' в chat %s", key, chat_id)
+
+        if sent:
+            self._last_sent[key] = now
+            if len(self._last_sent) > self._MAX_DEDUP_KEYS:
+                oldest_key = min(self._last_sent, key=self._last_sent.get)
+                del self._last_sent[oldest_key]
+            logger.info("Алерт '%s' отправлен", key)
 
     async def close(self) -> None:
         await self._http.aclose()

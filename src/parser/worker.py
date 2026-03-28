@@ -47,9 +47,18 @@ async def run_parser_worker(settings: Settings) -> None:
         threshold=settings.parser_circuit_breaker_threshold,
         cooldown_sec=settings.parser_circuit_breaker_cooldown_sec,
     )
+    # Загружаем tg_id всех активных участников для алертов
+    async with session_factory() as session:
+        from sqlalchemy import select as sa_select
+        from src.core.models import TeamMember
+        result = await session.execute(
+            sa_select(TeamMember.tg_id).where(TeamMember.is_active.is_(True))
+        )
+        team_chat_ids = [row[0] for row in result.all()]
+
     alert_service = AlertService(
         bot_token=settings.bot_token,
-        chat_id=settings.group_chat_id,
+        chat_ids=team_chat_ids if team_chat_ids else [settings.admin_tg_id],
         dedup_sec=settings.parser_alert_dedup_sec,
     )
     token_manager = TokenManager(
