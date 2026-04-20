@@ -68,6 +68,10 @@ def manager_main_menu_kb(is_paused: bool = False) -> InlineKeyboardMarkup:
                     text="Платформы",
                     callback_data="mgr:platforms",
                 ),
+                InlineKeyboardButton(
+                    text="Стоп-слова",
+                    callback_data="mgr:stopwords",
+                ),
             ],
         ],
     )

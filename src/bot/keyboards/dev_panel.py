@@ -93,7 +93,9 @@ def stack_actions_kb() -> InlineKeyboardMarkup:
 _SW_PAGE_SIZE = 12
 
 
-def stop_words_kb(words: list[str], page: int = 0) -> InlineKeyboardMarkup:
+def stop_words_kb(
+    words: list[str], page: int = 0, back_cb: str = "dev:back",
+) -> InlineKeyboardMarkup:
     """Список стоп-слов с кнопками удаления, пагинацией, экспортом и очисткой.
 
     Стоп-слова отображаются по 2 в ряд. Показывается страница page (0-based)
@@ -106,6 +108,7 @@ def stop_words_kb(words: list[str], page: int = 0) -> InlineKeyboardMarkup:
       - добавление: sw:add
       - экспорт: sw:export
       - очистить: sw:clear:confirm
+      - назад: через параметр back_cb (по умолчанию "dev:back")
     """
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -181,14 +184,16 @@ def stop_words_kb(words: list[str], page: int = 0) -> InlineKeyboardMarkup:
     )
     rows.append(
         [
-            InlineKeyboardButton(text="<- Назад", callback_data="dev:back"),
+            InlineKeyboardButton(text="<- Назад", callback_data=back_cb),
         ]
     )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def stop_words_clear_confirm_kb(count: int) -> InlineKeyboardMarkup:
+def stop_words_clear_confirm_kb(
+    count: int, back_cb: str = "dev:stopwords",
+) -> InlineKeyboardMarkup:
     """Подтверждение полной очистки списка стоп-слов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -199,7 +204,7 @@ def stop_words_clear_confirm_kb(count: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(
                     text="← Назад",
-                    callback_data="dev:stopwords",
+                    callback_data=back_cb,
                 ),
             ],
         ],

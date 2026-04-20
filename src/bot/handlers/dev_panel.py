@@ -75,6 +75,27 @@ def _is_admin(tg_id: int | None) -> bool:
     """Проверить, является ли пользователь админом."""
     return tg_id == ADMIN_TG_ID
 
+
+async def _can_edit_stopwords(
+    tg_id: int | None, session: AsyncSession,
+) -> bool:
+    """Проверить доступ к управлению стоп-словами: admin ИЛИ менеджер.
+
+    Менеджер определяется по TeamMember.role == manager + is_active.
+    """
+    if _is_admin(tg_id):
+        return True
+    if tg_id is None:
+        return False
+    result = await session.execute(
+        select(TeamMember).where(
+            TeamMember.tg_id == tg_id,
+            TeamMember.is_active.is_(True),
+            TeamMember.role == TeamRole.manager,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
 # Дефолтные промпты из файлов
 DEFAULT_PROMPTS: dict[str, str] = {
     "analyze": DEFAULT_ANALYZE,
@@ -416,26 +437,41 @@ def _build_sw_header(words: list[str], page: int = 0) -> str:
     )
 
 
-@router.callback_query(F.data == "dev:stopwords")
+async def _sw_back_cb(state: FSMContext) -> str:
+    """Получить из FSM state куда вести по 'Назад' из стоп-слов (dev/mgr)."""
+    data = await state.get_data()
+    return data.get("sw_back_cb", "dev:back")
+
+
+@router.callback_query(F.data.in_({"dev:stopwords", "mgr:stopwords"}))
 async def handle_dev_stopwords(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
     state: FSMContext,
 ) -> None:
-    """Показать список стоп-слов (только админ), страница 0."""
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Доступно только админу", show_alert=True)
-        return
-    await state.clear()
-    await callback.answer()
+    """Показать список стоп-слов (admin или manager), страница 0."""
+    is_mgr_entry = callback.data == "mgr:stopwords"
 
     async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру",
+                show_alert=True,
+            )
+            return
         words = await get_stop_words(session, settings)
+
+    # Сохраняем контекст возврата (dev или mgr) — чтобы все sw:* handlers
+    # могли рисовать правильную кнопку Назад.
+    await state.clear()
+    back_cb = "mgr:back" if is_mgr_entry else "dev:back"
+    await state.update_data(sw_back_cb=back_cb)
+    await callback.answer()
 
     await callback.message.edit_text(  # type: ignore[union-attr]
         _build_sw_header(words),
-        reply_markup=stop_words_kb(words, page=0),
+        reply_markup=stop_words_kb(words, page=0, back_cb=back_cb),
     )
 
 
@@ -444,20 +480,24 @@ async def handle_stop_words_page(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    state: FSMContext,
 ) -> None:
     """Переключить страницу списка стоп-слов."""
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Доступно только админу", show_alert=True)
-        return
+    async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
+        words = await get_stop_words(session, settings)
+
     await callback.answer()
     page = int(callback.data.split("sw:page:", 1)[1])  # type: ignore[union-attr]
-
-    async with session_factory() as session:
-        words = await get_stop_words(session, settings)
+    back_cb = await _sw_back_cb(state)
 
     await callback.message.edit_text(  # type: ignore[union-attr]
         _build_sw_header(words),
-        reply_markup=stop_words_kb(words, page=page),
+        reply_markup=stop_words_kb(words, page=page, back_cb=back_cb),
     )
 
 
@@ -472,34 +512,53 @@ async def handle_sw_delete(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    state: FSMContext,
 ) -> None:
     """Удалить стоп-слово и остаться на текущей (или ближайшей) странице."""
-    await callback.answer()
-    word = callback.data.split("sw:del:", 1)[1]  # type: ignore[union-attr]
-
     async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
+        word = callback.data.split("sw:del:", 1)[1]  # type: ignore[union-attr]
         words = await remove_stop_word(session, word)
 
+    await callback.answer()
+    back_cb = await _sw_back_cb(state)
     await callback.message.edit_text(  # type: ignore[union-attr]
         _build_sw_header(words),
-        reply_markup=stop_words_kb(words, page=0),
+        reply_markup=stop_words_kb(words, page=0, back_cb=back_cb),
     )
-    logger.info("Стоп-слово удалено: %s", word)
+    logger.info("Стоп-слово удалено: %s (user=%s)", word, callback.from_user.id)
 
 
 @router.callback_query(F.data == "sw:add")
 async def handle_sw_add_start(
     callback: CallbackQuery,
     state: FSMContext,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Начать добавление стоп-слов (массовый ввод)."""
+    async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
+
     await callback.answer()
+    # Сохраняем контекст (dev/mgr) — state.set_state сбрасывает data, поэтому
+    # перечитываем back_cb из текущего состояния до смены.
+    back_cb = await _sw_back_cb(state)
     await state.set_state(DevPanelStates.adding_stop_word)
+    await state.update_data(sw_back_cb=back_cb)
+    cancel_back = "dev:stopwords" if back_cb == "dev:back" else "mgr:stopwords"
     await callback.message.answer(  # type: ignore[union-attr]
         "Введи одно или несколько стоп-слов.\n"
         "Разделители: запятая, перенос строки, точка с запятой.\n\n"
         "<i>Пример:</i> <code>WordPress, Битрикс, 1С</code>",
-        reply_markup=cancel_dev_kb("dev:stopwords"),
+        reply_markup=cancel_dev_kb(cancel_back),
     )
 
 
@@ -525,11 +584,16 @@ async def process_add_stop_word(
         return
 
     async with session_factory() as session:
+        if not await _can_edit_stopwords(message.from_user.id if message.from_user else None, session):
+            await state.clear()
+            await message.answer("Доступно только админу и менеджеру.")
+            return
         # Узнаём количество до добавления
         before_words = await get_stop_words(session, settings)
         before_count = len(before_words)
         words, added = await bulk_add_stop_words(session, new_words)
 
+    back_cb = await _sw_back_cb(state)
     await state.clear()
 
     after_count = len(words)
@@ -543,7 +607,7 @@ async def process_add_stop_word(
 
     await message.answer(
         f"<b>Стоп-слова</b>\n\n{result_text}",
-        reply_markup=stop_words_kb(words, page=0),
+        reply_markup=stop_words_kb(words, page=0, back_cb=back_cb),
     )
     logger.info(
         "Массовое добавление стоп-слов: добавлено %d из %d, всего стало %d",
@@ -558,13 +622,15 @@ async def handle_sw_export(
     settings: Settings,
 ) -> None:
     """Экспортировать список стоп-слов в .txt файл (по одному слову на строку, сортировка)."""
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Доступно только админу", show_alert=True)
-        return
-    await callback.answer()
-
     async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
         words = await get_stop_words(session, settings)
+
+    await callback.answer()
 
     if not words:
         await callback.answer("Список стоп-слов пуст — нечего экспортировать.", show_alert=True)
@@ -586,25 +652,29 @@ async def handle_sw_clear_confirm(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    state: FSMContext,
 ) -> None:
     """Показать экран подтверждения удаления всех стоп-слов."""
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Доступно только админу", show_alert=True)
-        return
-    await callback.answer()
-
     async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
         words = await get_stop_words(session, settings)
 
+    await callback.answer()
     count = len(words)
     if not count:
         await callback.answer("Список и так пуст.", show_alert=True)
         return
 
+    back_cb = await _sw_back_cb(state)
+    confirm_back = "dev:stopwords" if back_cb == "dev:back" else "mgr:stopwords"
     await callback.message.edit_text(  # type: ignore[union-attr]
         f"<b>Очистить все стоп-слова?</b>\n\n"
         f"Будет удалено <b>{count}</b> слов. Отмена невозможна.",
-        reply_markup=stop_words_clear_confirm_kb(count),
+        reply_markup=stop_words_clear_confirm_kb(count, back_cb=confirm_back),
     )
 
 
@@ -612,21 +682,24 @@ async def handle_sw_clear_confirm(
 async def handle_sw_clear_do(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
+    state: FSMContext,
 ) -> None:
     """Обнулить список стоп-слов."""
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("Доступно только админу", show_alert=True)
-        return
-    await callback.answer()
-
     async with session_factory() as session:
+        if not await _can_edit_stopwords(callback.from_user.id, session):
+            await callback.answer(
+                "Доступно только админу и менеджеру", show_alert=True,
+            )
+            return
         await set_stop_words(session, [])
 
+    await callback.answer()
+    back_cb = await _sw_back_cb(state)
     await callback.message.edit_text(  # type: ignore[union-attr]
         "<b>Стоп-слова</b>\n\nСписок очищен.\n\n"
         f"{_SW_INFO}\n\n"
         "Добавьте первое стоп-слово:",
-        reply_markup=stop_words_kb([], page=0),
+        reply_markup=stop_words_kb([], page=0, back_cb=back_cb),
     )
     logger.info("tg_id=%s очистил все стоп-слова", callback.from_user.id)
 
