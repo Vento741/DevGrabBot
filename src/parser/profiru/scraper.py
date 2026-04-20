@@ -185,26 +185,45 @@ class ProfiruParser(BaseParser):
     async def process_raw_orders(self, raw_orders: list[dict], token: str) -> list[dict]:
         """Нормализовать и обогатить сырые заказы ценами.
 
+        Pre-filter: фильтрация через `self.filter_order()` выполняется ДО вызова
+        `_fetch_order_details`. Это экономит getOrder REST-запросы на заказах,
+        которые точно не пройдут (слишком старые, со стоп-словами) — такие заказы
+        возвращаются без обогащения ценой/материалами, worker всё равно их отсеет.
+
         Args:
             raw_orders: список сырых snippet-ов из GraphQL
             token: токен для запросов getOrder
 
         Returns:
-            Список нормализованных заказов с ценами отклика.
+            Список нормализованных заказов. У прошедших pre-filter есть цена
+            и материалы, у остальных — нормализованные пустые поля.
         """
         normalized = [self._normalize(item) for item in raw_orders]
 
-        # Обогащаем деталями с REST API (цена отклика + материалы, с паузами)
+        skipped_enrichment = 0
         for order in normalized:
             ext_id = order.get("external_id")
-            if ext_id:
-                details = await self._fetch_order_details(ext_id, token)
-                if details.get("response_price") is not None:
-                    order["response_price"] = details["response_price"]
-                if details.get("materials"):
-                    order["materials"] = details["materials"]
-                # Пауза после HTTP-запроса (anti-ban)
-                await self._random_delay()
+            if not ext_id:
+                continue
+
+            # Pre-filter: не тратим getOrder на заказы которые точно отсеются
+            if not self.filter_order(order):
+                skipped_enrichment += 1
+                continue
+
+            details = await self._fetch_order_details(ext_id, token)
+            if details.get("response_price") is not None:
+                order["response_price"] = details["response_price"]
+            if details.get("materials"):
+                order["materials"] = details["materials"]
+            # Пауза после HTTP-запроса (anti-ban)
+            await self._random_delay()
+
+        if skipped_enrichment:
+            logger.debug(
+                "Pre-filter: пропущено %d getOrder запросов (устаревшие/стоп-слова)",
+                skipped_enrichment,
+            )
 
         return normalized
 
