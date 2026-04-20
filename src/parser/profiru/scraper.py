@@ -195,12 +195,14 @@ class ProfiruParser(BaseParser):
             token: токен для запросов getOrder
 
         Returns:
-            Список нормализованных заказов. У прошедших pre-filter есть цена
-            и материалы, у остальных — нормализованные пустые поля.
+            Список нормализованных заказов, прошедших pre-filter. Отсеянные
+            по возрасту/стоп-словам не возвращаются вообще — worker получает
+            только валидные и дополнительно чекает их на dedup.
         """
         normalized = [self._normalize(item) for item in raw_orders]
 
-        skipped_enrichment = 0
+        accepted: list[dict] = []
+        skipped = 0
         for order in normalized:
             ext_id = order.get("external_id")
             if not ext_id:
@@ -208,7 +210,7 @@ class ProfiruParser(BaseParser):
 
             # Pre-filter: не тратим getOrder на заказы которые точно отсеются
             if not self.filter_order(order):
-                skipped_enrichment += 1
+                skipped += 1
                 continue
 
             details = await self._fetch_order_details(ext_id, token)
@@ -216,16 +218,18 @@ class ProfiruParser(BaseParser):
                 order["response_price"] = details["response_price"]
             if details.get("materials"):
                 order["materials"] = details["materials"]
+            accepted.append(order)
             # Пауза после HTTP-запроса (anti-ban)
             await self._random_delay()
 
-        if skipped_enrichment:
+        if skipped:
             logger.debug(
-                "Pre-filter: пропущено %d getOrder запросов (устаревшие/стоп-слова)",
-                skipped_enrichment,
+                "Pre-filter: отсеяно %d заказов до getOrder "
+                "(устаревшие/стоп-слова), прошло %d",
+                skipped, len(accepted),
             )
 
-        return normalized
+        return accepted
 
     def filter_order(self, order: dict) -> bool:
         """Проверить заказ через ProfiruFilters."""
