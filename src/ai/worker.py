@@ -45,12 +45,18 @@ async def run_ai_worker(settings: Settings):
 
             try:
                 async with session_factory() as session:
-                    # Проверяем дубликат
+                    # Проверяем дубликат с учётом platform (v2.4 composite unique)
+                    platform_val = order_data.get("platform", "profiru")
                     existing = await session.execute(
-                        select(Order).where(Order.external_id == external_id)
+                        select(Order).where(
+                            Order.platform == platform_val,
+                            Order.external_id == external_id,
+                        )
                     )
                     if existing.scalar_one_or_none():
-                        logger.info(f"Заказ {external_id} уже в БД, пропускаем")
+                        logger.info(
+                            f"Заказ {platform_val}/{external_id} уже в БД, пропускаем"
+                        )
                         continue
 
                     # Загружаем актуальный промпт из DB (fallback на файловый)
@@ -66,7 +72,8 @@ async def run_ai_worker(settings: Settings):
                     # Сохраняем заказ
                     order = Order(
                         external_id=external_id,
-                        platform=order_data.get("platform", "profiru"),
+                        platform=platform_val,
+                        url=order_data.get("url"),
                         title=order_data.get("title", ""),
                         description=order_data.get("description", ""),
                         budget=order_data.get("budget"),
@@ -149,6 +156,8 @@ async def run_ai_worker(settings: Settings):
                     await redis.push_analyzed({
                         "order_id": order.id,
                         "external_id": external_id,
+                        "platform": platform_val,
+                        "url": order_data.get("url"),
                         "title": order.title,
                         "budget": order_data.get("budget", ""),
                         "location": order_data.get("location", ""),
