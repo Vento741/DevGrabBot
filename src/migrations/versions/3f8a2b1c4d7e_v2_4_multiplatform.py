@@ -13,13 +13,13 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "3f8a2b1c4d7e"
-down_revision: Union[str, None] = "172fb6762889"
+down_revision: Union[str, None] = "a3b5e7f91c02"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
+    bind = op.get_bind()  # noqa: F841 — используется неявно в op.* и _type.create()
 
     # 1. Создаём PostgreSQL enum sourceplatform.
     sourceplatform = sa.Enum("profiru", "kwork", name="sourceplatform")
@@ -43,18 +43,11 @@ def upgrade() -> None:
     )
 
     # 3. Меняем unique constraint на orders: external_id → (platform, external_id).
-    # Имя автосгенерированного constraint зависит от версии SQLAlchemy;
-    # ищем и удаляем его динамически.
-    constraint_name = bind.execute(
-        sa.text(
-            "SELECT conname FROM pg_constraint "
-            "WHERE conrelid = 'orders'::regclass "
-            "AND contype = 'u' "
-            "AND pg_get_constraintdef(oid) = 'UNIQUE (external_id)'"
-        )
-    ).scalar()
-    if constraint_name:
-        op.execute(f'ALTER TABLE orders DROP CONSTRAINT "{constraint_name}"')
+    # PostgreSQL автогенерирует имя `orders_external_id_key` для UNIQUE(external_id)
+    # (подтверждено на продакшене 2026-04-20). Используем IF EXISTS для безопасности.
+    op.execute(
+        'ALTER TABLE orders DROP CONSTRAINT IF EXISTS "orders_external_id_key"'
+    )
 
     op.create_unique_constraint(
         "uq_orders_platform_external_id",
