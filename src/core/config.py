@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     profiru_login: str
     profiru_password: str = ""
     profiru_token: str = ""
+    profiru_enabled: bool = True
+
+    # Kwork
+    kwork_login: str = ""
+    kwork_password: str = ""
+    kwork_phone_last: str = ""  # последние 4 цифры телефона (опционально)
+    kwork_enabled: bool = False
+    kwork_categories: str = "11"  # CSV category IDs (11 = "Разработка и IT")
+    kwork_rps: float = 2.0  # rate limit: запросов в секунду
+    kwork_burst: int = 5  # rate limit: burst capacity
+    kwork_poll_interval_sec: int = 120  # интервал опроса API
+    kwork_proxy: str = ""  # socks5://user:pass@host:port (опционально)
+    kwork_dedup_ttl_sec: int = 604800  # 7 дней TTL для seen_ids
 
     # Parser
     parse_interval_sec: int = 600

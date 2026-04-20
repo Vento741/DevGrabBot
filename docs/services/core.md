@@ -1,7 +1,16 @@
 # Core — Ядро системы
 
-> **Последнее обновление:** 2026-03-25 (RedisClient: PARSER_PAUSED_KEY + методы управления паузой парсера)
+> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — SourcePlatform enum, Order.url, составной unique, TeamMember.platforms, KWORK_* настройки; settings_service: `bulk_add_stop_words`)
 > **ВАЖНО:** При любых изменениях в модуле `src/core/` — обновить этот документ!
+
+## v2.4 Multi-platform изменения (2026-04-20)
+
+- `SourcePlatform(str, enum.Enum)` — новое перечисление: `profiru`, `kwork`.
+- `Order.platform: SourcePlatform` (раньше String(50)) + составной `UniqueConstraint("platform", "external_id")` вместо прежнего `unique=True` на одном `external_id` — разные платформы могут иметь одинаковые ID заявок.
+- `Order.url: str | None` — новая колонка, сохраняет URL заявки на платформе (для inline-кнопок). Миграция бэкфиллит существующие Profi.ru заказы.
+- `TeamMember.platforms: list[str]` — JSON-поле, default `["profiru", "kwork"]`. Dev/PM выбирает с каких площадок получать заявки.
+- Миграция: `3f8a2b1c4d7e_v2_4_multiplatform.py`.
+- `Settings` расширен: `profiru_enabled`, `kwork_login`, `kwork_password`, `kwork_phone_last`, `kwork_enabled`, `kwork_categories`, `kwork_rps`, `kwork_burst`, `kwork_poll_interval_sec`, `kwork_proxy`, `kwork_dedup_ttl_sec`.
 
 ## Назначение
 
@@ -274,6 +283,7 @@ create_session_factory(engine) → async_sessionmaker[AsyncSession]
 | `get_stop_words` | `(session, config) → list[str]` | DB → config.stop_words fallback |
 | `set_stop_words` | `(session, words) → None` | Перезаписать весь список |
 | `add_stop_word` | `(session, word) → list[str]` | Добавить слово; вернуть обновлённый список |
+| `bulk_add_stop_words` | `(session, words) → (list[str], int)` | Атомарно добавить несколько слов; дедупликация case-insensitive; возвращает (обновлённый_список, кол-во_добавленных) |
 | `remove_stop_word` | `(session, word) → list[str]` | Удалить слово; вернуть обновлённый список |
 
 ### Промпты (key="prompt_{name}")
@@ -298,7 +308,7 @@ create_session_factory(engine) → async_sessionmaker[AsyncSession]
 
 - `set_setting` и `delete_setting` — атомарны, делают `commit()` сами
 - `get_stop_words`, `get_prompt`, `get_config_setting` — только чтение, `commit()` не вызывают
-- `add_stop_word` / `remove_stop_word` / `set_stop_words` — делегируют в `set_setting`, commit внутри
+- `add_stop_word` / `bulk_add_stop_words` / `remove_stop_word` / `set_stop_words` — делегируют в `set_setting`, commit внутри
 - `set_prompt` / `reset_prompt` — делегируют в `set_setting` / `delete_setting`, commit внутри
 
 ---

@@ -109,7 +109,12 @@ def _build_review_summary(
     price_display = _format_price_range(ctx.price_min, ctx.price_max, fallback="—")
     response_price_str = f"{order.response_price} руб." if order.response_price else "—"
 
-    text = f"<b>Заявка:</b> {order.external_id} — {order.title}\n\n"
+    from src.bot.utils.platforms import get_platform_label
+    platform_label = get_platform_label(getattr(order, "platform", None))
+    text = (
+        f"<b>Заявка:</b> {order.external_id} — {order.title}\n"
+        f"<b>Источник:</b> {platform_label}\n\n"
+    )
 
     # AI-выжимка
     if ctx.summary:
@@ -199,8 +204,10 @@ async def _update_review_message(
             text=summary,
             chat_id=chat_id,
             message_id=message_id,
+            # v2.4: platform badge в кнопках
             reply_markup=review_actions_kb(
                 assignment.id, order.id, order.external_id,
+                platform=getattr(order, "platform", None),
             ),
         )
     except TelegramAPIError as e:
@@ -659,6 +666,7 @@ async def handle_approve(
         # Сохраняем скалярные значения до закрытия сессии
         order_id = order.id
         order_external_id = order.external_id
+        order_platform = order.platform
         order_title = order.title
         custom_notes = assignment.custom_notes
         stack_final = assignment.stack_final
@@ -703,7 +711,10 @@ async def handle_approve(
     try:
         await callback.message.edit_text(  # type: ignore[union-attr]
             text=approved_text,
-            reply_markup=approved_kb(order_external_id, manager_username, order_id),
+            reply_markup=approved_kb(
+                order_external_id, manager_username, order_id,
+                platform=order_platform,
+            ),
         )
     except TelegramAPIError as e:
         logger.warning("Не удалось обновить сообщение после утверждения: %s", e)

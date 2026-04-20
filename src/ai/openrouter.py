@@ -28,17 +28,39 @@ class OpenRouterClient:
             "temperature": 0.3,
         }
 
+    def _build_payload_no_system(self, system_prompt: str, user_message: str) -> dict:
+        """Payload без system role (для моделей без поддержки developer instructions)."""
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": f"{system_prompt}\n\n{user_message}"},
+            ],
+            "temperature": 0.3,
+        }
+
     async def complete(self, system_prompt: str, user_message: str) -> str:
         """Отправить запрос и вернуть текст ответа."""
         payload = self._build_payload(system_prompt, user_message)
-        response = await self._http.post(
-            OPENROUTER_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        response = await self._http.post(OPENROUTER_URL, json=payload, headers=headers)
+
+        # Fallback: модель не поддерживает system role → объединяем в user
+        if response.status_code == 400:
+            body = response.json()
+            err_msg = body.get("error", {}).get("metadata", {}).get("raw", "")
+            if "Developer instruction is not enabled" in err_msg:
+                logger.warning(
+                    f"Модель {self.model} не поддерживает system role, "
+                    f"fallback на user-only"
+                )
+                payload = self._build_payload_no_system(system_prompt, user_message)
+                response = await self._http.post(
+                    OPENROUTER_URL, json=payload, headers=headers,
+                )
+
         response.raise_for_status()
         data = response.json()
         return data["choices"][0]["message"]["content"]

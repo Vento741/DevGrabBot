@@ -22,20 +22,44 @@ def dev_main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Мои заявки", callback_data="dev:orders"),
         ],
         [
+            InlineKeyboardButton(text="Платформы", callback_data="dev:platforms"),
             InlineKeyboardButton(text="Команда", callback_data="dev:team"),
+        ],
+        [
             InlineKeyboardButton(text="Статистика", callback_data="dev:stats"),
         ],
     ]
 
     if is_admin:
-        rows.insert(1, [
+        rows.insert(2, [
             InlineKeyboardButton(text="Стоп-слова", callback_data="dev:stopwords"),
             InlineKeyboardButton(text="Промпты", callback_data="dev:prompts"),
         ])
-        rows.insert(2, [
+        rows.insert(3, [
             InlineKeyboardButton(text="Настройки", callback_data="dev:settings"),
         ])
 
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def platforms_kb(user_platforms: list[str]) -> InlineKeyboardMarkup:
+    """Клавиатура выбора платформ для подписки (чекбокс-стиль).
+
+    Каждая платформа — отдельная переключаемая кнопка.
+    """
+    from src.bot.utils.platforms import ALL_PLATFORMS, get_platform_label
+
+    enabled = {p.lower() for p in (user_platforms or [])}
+    rows: list[list[InlineKeyboardButton]] = []
+    for platform in ALL_PLATFORMS:
+        mark = "✅" if platform in enabled else "☐"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{mark} {get_platform_label(platform)}",
+                callback_data=f"platforms:toggle:{platform}",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="<- Назад", callback_data="dev:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -66,31 +90,75 @@ def stack_actions_kb() -> InlineKeyboardMarkup:
     )
 
 
-def stop_words_kb(words: list[str]) -> InlineKeyboardMarkup:
-    """Список стоп-слов с кнопками удаления.
+_SW_PAGE_SIZE = 12
 
-    Стоп-слова размещаются по 2 в ряд. Каждая кнопка содержит крестик
-    и само слово. callback_data удаления: sw:del:{word}.
+
+def stop_words_kb(words: list[str], page: int = 0) -> InlineKeyboardMarkup:
+    """Список стоп-слов с кнопками удаления, пагинацией, экспортом и очисткой.
+
+    Стоп-слова отображаются по 2 в ряд. Показывается страница page (0-based)
+    по _SW_PAGE_SIZE слов. Под словами — ряд навигации по страницам,
+    затем кнопки «Добавить», «Экспорт», «Очистить всё» и «Назад».
+
+    callback_data:
+      - удаление: sw:del:{word}
+      - пагинация: sw:page:{n}
+      - добавление: sw:add
+      - экспорт: sw:export
+      - очистить: sw:clear:confirm
     """
     rows: list[list[InlineKeyboardButton]] = []
 
-    # Формируем ряды по 2 кнопки удаления
-    for i in range(0, len(words), 2):
+    total = len(words)
+    total_pages = max(1, (total + _SW_PAGE_SIZE - 1) // _SW_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * _SW_PAGE_SIZE
+    page_words = words[start: start + _SW_PAGE_SIZE]
+
+    # Слова по 2 в ряд
+    for i in range(0, len(page_words), 2):
         row = [
             InlineKeyboardButton(
-                text=f"X {words[i]}",
-                callback_data=f"sw:del:{words[i]}",
+                text=f"X {page_words[i]}",
+                callback_data=f"sw:del:{page_words[i]}",
             )
         ]
-        if i + 1 < len(words):
+        if i + 1 < len(page_words):
             row.append(
                 InlineKeyboardButton(
-                    text=f"X {words[i + 1]}",
-                    callback_data=f"sw:del:{words[i + 1]}",
+                    text=f"X {page_words[i + 1]}",
+                    callback_data=f"sw:del:{page_words[i + 1]}",
                 )
             )
         rows.append(row)
 
+    # Ряд пагинации (скрываем крайние стрелки)
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"sw:page:{page - 1}",
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"Стр. {page + 1}/{total_pages}",
+                callback_data="sw:noop",
+            )
+        )
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"sw:page:{page + 1}",
+                )
+            )
+        rows.append(nav_row)
+
+    # Кнопки действий
     rows.append(
         [
             InlineKeyboardButton(
@@ -101,11 +169,41 @@ def stop_words_kb(words: list[str]) -> InlineKeyboardMarkup:
     )
     rows.append(
         [
+            InlineKeyboardButton(
+                text="📥 Экспорт",
+                callback_data="sw:export",
+            ),
+            InlineKeyboardButton(
+                text="🗑 Очистить всё",
+                callback_data="sw:clear:confirm",
+            ),
+        ]
+    )
+    rows.append(
+        [
             InlineKeyboardButton(text="<- Назад", callback_data="dev:back"),
         ]
     )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def stop_words_clear_confirm_kb(count: int) -> InlineKeyboardMarkup:
+    """Подтверждение полной очистки списка стоп-слов."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"❌ Да, удалить все {count}",
+                    callback_data="sw:clear:do",
+                ),
+                InlineKeyboardButton(
+                    text="← Назад",
+                    callback_data="dev:stopwords",
+                ),
+            ],
+        ],
+    )
 
 
 def prompts_list_kb() -> InlineKeyboardMarkup:
@@ -329,11 +427,14 @@ def orders_list_kb(
     """Список заявок как кликабельные кнопки -> детальная карточка."""
     rows: list[list[InlineKeyboardButton]] = []
 
+    from src.bot.utils.platforms import get_platform_badge
+
     for a in assignments:
         order = a.order
         icon = _STATUS_ICONS.get(a.status.value, "")
-        title_short = (order.title[:30] + "...") if len(order.title or "") > 30 else (order.title or "")
-        btn_text = f"{icon} {order.external_id} — {title_short}"
+        badge = get_platform_badge(getattr(order, "platform", None))
+        title_short = (order.title[:28] + "...") if len(order.title or "") > 28 else (order.title or "")
+        btn_text = f"{icon} {badge} {order.external_id} — {title_short}".strip()
         rows.append([InlineKeyboardButton(
             text=btn_text,
             callback_data=f"dev_order:{a.id}",
@@ -355,8 +456,11 @@ def order_detail_kb(
     order_id: int,
     external_id: str,
     has_materials: bool = False,
+    platform=None,
 ) -> InlineKeyboardMarkup:
     """Кнопки для детальной карточки заявки в 'Мои заявки'."""
+    from src.bot.utils.platforms import get_order_url, get_platform_name
+
     rows: list[list[InlineKeyboardButton]] = []
     if has_materials:
         rows.append([
@@ -366,6 +470,12 @@ def order_detail_kb(
                 style="primary",
             ),
         ])
+
+    platform_name = get_platform_name(platform or "profiru")
+    link_url = get_order_url(platform or "profiru", external_id) or (
+        f"https://profi.ru/backoffice/n.php?o={external_id}"
+    )
+
     rows.extend([
         [
             InlineKeyboardButton(
@@ -373,8 +483,8 @@ def order_detail_kb(
                 callback_data=f"original:{order_id}",
             ),
             InlineKeyboardButton(
-                text="Открыть на Профи.ру",
-                url=f"https://profi.ru/backoffice/n.php?o={external_id}",
+                text=f"Открыть на {platform_name}",
+                url=link_url,
             ),
         ],
         [

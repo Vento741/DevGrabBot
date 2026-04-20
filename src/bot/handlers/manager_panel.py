@@ -31,6 +31,7 @@ from src.bot.keyboards.manager_panel import (
     developer_detail_kb,
     developers_list_kb,
     manager_main_menu_kb,
+    manager_platforms_kb,
     orders_status_kb,
     profile_settings_kb,
     response_actions_kb,
@@ -1004,6 +1005,93 @@ async def process_order_search(
 # ---------------------------------------------------------------------------
 
 
+@router.callback_query(F.data == "mgr:platforms")
+async def handle_mgr_platforms(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Экран выбора платформ для менеджера."""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(TeamMember).where(TeamMember.tg_id == user_id)
+        )
+        member = result.scalar_one_or_none()
+
+    if not member:
+        await callback.answer("Вы не в команде.", show_alert=True)
+        return
+
+    from src.bot.utils.platforms import ALL_PLATFORMS, get_platform_label
+    user_platforms = member.platforms or list(ALL_PLATFORMS)
+    enabled_labels = [
+        get_platform_label(p) for p in ALL_PLATFORMS if p in user_platforms
+    ]
+    enabled_str = ", ".join(enabled_labels) if enabled_labels else "ничего"
+
+    text = (
+        "<b>Платформы</b>\n\n"
+        "Выберите, с каких площадок получать заявки в свои отклики.\n\n"
+        f"<b>Сейчас подписаны:</b> {enabled_str}"
+    )
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        reply_markup=manager_platforms_kb(user_platforms),
+    )
+
+
+@router.callback_query(F.data.startswith("mgr_platforms:toggle:"))
+async def handle_mgr_platforms_toggle(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Переключить подписку менеджера на платформу."""
+    await callback.answer()
+    user_id = callback.from_user.id
+    platform = callback.data.split(":", 2)[2] if callback.data else ""
+
+    from src.bot.utils.platforms import ALL_PLATFORMS, get_platform_label
+    if platform not in ALL_PLATFORMS:
+        await callback.answer("Неизвестная платформа.", show_alert=True)
+        return
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(TeamMember).where(TeamMember.tg_id == user_id)
+        )
+        member = result.scalar_one_or_none()
+        if not member:
+            await callback.answer("Вы не в команде.", show_alert=True)
+            return
+
+        current = list(member.platforms or list(ALL_PLATFORMS))
+        if platform in current:
+            current.remove(platform)
+            action = "отключена"
+        else:
+            current.append(platform)
+            action = "включена"
+        member.platforms = current
+        await session.commit()
+
+    enabled_labels = [
+        get_platform_label(p) for p in ALL_PLATFORMS if p in current
+    ]
+    enabled_str = ", ".join(enabled_labels) if enabled_labels else "ничего"
+
+    text = (
+        "<b>Платформы</b>\n\n"
+        f"{get_platform_label(platform)} — {action}.\n\n"
+        f"<b>Сейчас подписаны:</b> {enabled_str}"
+    )
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        reply_markup=manager_platforms_kb(current),
+    )
+
+
 @router.callback_query(F.data == "mgr:devs")
 async def handle_mgr_devs(
     callback: CallbackQuery,
@@ -1213,12 +1301,15 @@ async def handle_mdev_assign(
         return
 
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from src.bot.utils.platforms import get_platform_badge
 
     buttons = []
     for o in orders:
+        badge = get_platform_badge(getattr(o, "platform", None))
+        label = f"{badge} #{o.external_id}".strip()
         buttons.append([
             InlineKeyboardButton(
-                text=f"#{o.external_id} — {(o.title or '')[:40]}",
+                text=f"{label} — {(o.title or '')[:38]}",
                 callback_data=f"assign:{developer_id}:{o.id}",
             )
         ])

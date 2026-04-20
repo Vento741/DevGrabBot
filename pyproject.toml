@@ -15,6 +15,7 @@ dependencies = [
     "webdriver-manager>=4.0",
     "beautifulsoup4>=4.12",
     "python-dotenv>=1.0",
+    "kwork[proxy]>=0.2.0",
 ]
 
 [project.optional-dependencies]

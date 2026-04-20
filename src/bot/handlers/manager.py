@@ -17,6 +17,7 @@ from src.core.models import (
     TeamRole,
 )
 from src.bot.keyboards.review import pm_response_kb, pm_status_badge_kb
+from src.bot.utils.platforms import get_platform_label
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +81,10 @@ async def send_to_manager(
         order_external_id = order.external_id
         resp_price_str = f"{order.response_price} руб." if order.response_price else "—"
 
+        platform_label = get_platform_label(order.platform)
         text = (
-            f"<b>Готовый отклик</b> | {order.external_id}\n\n"
+            f"<b>Готовый отклик</b> | {order.external_id}\n"
+            f"<b>Источник:</b> {platform_label}\n\n"
             f"<b>Заявка:</b> {order.title}\n"
             f"<b>Исполнитель:</b> {developer.name}"
             f"{' (@' + developer.tg_username + ')' if developer.tg_username else ''}\n"
@@ -102,6 +105,7 @@ async def send_to_manager(
         text=text,
         reply_markup=pm_response_kb(
             assignment_id, response_id, order_external_id,
+            platform=order.platform,
         ) if response_id else None,
     )
     logger.info(
@@ -190,6 +194,7 @@ async def handle_pm_sent(
             response_id = 0
 
         external_id = assignment.order.external_id
+        platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
         await session.commit()
 
@@ -204,7 +209,7 @@ async def handle_pm_sent(
         await callback.message.edit_reply_markup(  # type: ignore[union-attr]
             reply_markup=pm_response_kb(
                 assignment_id, response_id, external_id,
-                hide_sent=True,
+                hide_sent=True, platform=platform,
             ),
         )
     except Exception:
@@ -238,6 +243,7 @@ async def handle_pm_in_progress(
 
         response_id = assignment.manager_response.id if assignment.manager_response else 0
         external_id = assignment.order.external_id
+        platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
         await session.commit()
 
@@ -251,7 +257,7 @@ async def handle_pm_in_progress(
         await callback.message.edit_reply_markup(  # type: ignore[union-attr]
             reply_markup=pm_response_kb(
                 assignment_id, response_id, external_id,
-                hide_sent=True, hide_in_progress=True,
+                hide_sent=True, hide_in_progress=True, platform=platform,
             ),
         )
     except Exception:
@@ -281,6 +287,7 @@ async def handle_pm_cancel(
 
         response_id = assignment.manager_response.id if assignment.manager_response else 0
         external_id = assignment.order.external_id
+        platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
         await session.commit()
 
@@ -294,6 +301,7 @@ async def handle_pm_cancel(
         await callback.message.edit_reply_markup(  # type: ignore[union-attr]
             reply_markup=pm_status_badge_kb(
                 "\u274c Отменена (архив)", response_id, external_id,
+                platform=platform,
             ),
         )
     except Exception:

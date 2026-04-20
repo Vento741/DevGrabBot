@@ -2,6 +2,7 @@
 import asyncio
 import logging
 
+import httpx
 from sqlalchemy import select
 
 from src.core.config import Settings
@@ -14,6 +15,9 @@ from src.ai.prompts.analyze import SYSTEM_PROMPT as ANALYZE_PROMPT
 from src.core.settings_service import get_config_setting, get_prompt
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAYS = [30, 60, 120]  # секунды между retry при 429
 
 
 async def run_ai_worker(settings: Settings):
@@ -75,11 +79,37 @@ async def run_ai_worker(settings: Settings):
                     session.add(order)
                     await session.flush()
 
-                    # AI-анализ с промптом из DB (или файловым fallback)
-                    analysis_result = await analyzer.analyze_order(
-                        order.raw_text,
-                        system_prompt=analyze_prompt,
-                    )
+                    # AI-анализ с retry при 429
+                    analysis_result = None
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            analysis_result = await analyzer.analyze_order(
+                                order.raw_text,
+                                system_prompt=analyze_prompt,
+                            )
+                            break
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code == 429:
+                                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                                logger.warning(
+                                    f"Заказ {external_id}: 429 rate limit "
+                                    f"(попытка {attempt + 1}/{MAX_RETRIES}), "
+                                    f"ждём {delay}с..."
+                                )
+                                await asyncio.sleep(delay)
+                            else:
+                                raise
+
+                    # Все retry исчерпаны — возвращаем заказ в очередь
+                    if analysis_result is None:
+                        await session.rollback()
+                        await redis.push_order(order_data)
+                        logger.error(
+                            f"Заказ {external_id}: 429 после {MAX_RETRIES} попыток, "
+                            f"возвращён в очередь"
+                        )
+                        await asyncio.sleep(RETRY_DELAYS[-1])
+                        continue
 
                     # Расширенные данные (вопросы, пожелания, риски)
                     extra_data = {

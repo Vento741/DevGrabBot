@@ -4,13 +4,18 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text,
-    func,
+    UniqueConstraint, func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class SourcePlatform(str, enum.Enum):
+    profiru = "profiru"
+    kwork = "kwork"
 
 
 class OrderStatus(str, enum.Enum):
@@ -40,10 +45,17 @@ class TeamRole(str, enum.Enum):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("platform", "external_id", name="uq_orders_platform_external_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    external_id: Mapped[str] = mapped_column(String(50), unique=True)
-    platform: Mapped[str] = mapped_column(String(50), default="profiru")
+    external_id: Mapped[str] = mapped_column(String(50))
+    platform: Mapped[SourcePlatform] = mapped_column(
+        Enum(SourcePlatform, name="sourceplatform"),
+        default=SourcePlatform.profiru,
+    )
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(String(500))
     description: Mapped[str] = mapped_column(Text, default="")
     budget: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -167,6 +179,9 @@ class TeamMember(Base):
     stack_priority: Mapped[dict] = mapped_column(JSON, default=dict)
     bio: Mapped[str] = mapped_column(Text, default="")
     notify_assignments: Mapped[bool] = mapped_column(Boolean, default=True)
+    platforms: Mapped[list] = mapped_column(
+        JSON, default=lambda: ["profiru", "kwork"],
+    )
 
     assignments: Mapped[list["OrderAssignment"]] = relationship(
         back_populates="developer", foreign_keys="[OrderAssignment.developer_id]",

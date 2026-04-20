@@ -21,6 +21,8 @@ from src.parser.resilience.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
 
+# Базовые ключи — для обратной совместимости остаются для Profi.ru.
+# Для multi-platform ключи формируются через _key() с префиксом платформы.
 REDIS_TOKEN_KEY = "devgrab:parser:token"
 REDIS_COOKIES_KEY = "devgrab:parser:cookies"
 REDIS_AUTH_ATTEMPTS_KEY = "devgrab:parser:auth_attempts"
@@ -37,6 +39,8 @@ class TokenManager:
         token_ttl_sec: TTL токена в Redis
         max_auth_attempts: максимум попыток авторизации подряд
         auth_cooldown_sec: минимальный интервал между авторизациями
+        platform: имя платформы для неймспейсинга Redis ключей (default "profiru"
+            сохраняет обратную совместимость с v2.3)
     """
 
     def __init__(
@@ -48,6 +52,7 @@ class TokenManager:
         token_ttl_sec: int = 480,
         max_auth_attempts: int = 3,
         auth_cooldown_sec: int = 120,
+        platform: str = "profiru",
     ) -> None:
         self._redis = redis
         self._cb = circuit_breaker
@@ -56,10 +61,23 @@ class TokenManager:
         self._token_ttl = token_ttl_sec
         self._max_attempts = max_auth_attempts
         self._auth_cooldown = auth_cooldown_sec
+        self._platform = platform
         self._token: str | None = None  # in-memory cache (prfr_bo_tkn)
         self._cookies: dict[str, str] = {}  # все cookies сессии
         self._last_auth_time: float = 0.0
         self._executor = ThreadPoolExecutor(max_workers=1)
+
+        # Изолированные ключи на платформу — для profiru совпадают со старыми
+        # (обратная совместимость с работающим кэшем), для остальных включают
+        # префикс платформы.
+        if platform == "profiru":
+            self._token_key = REDIS_TOKEN_KEY
+            self._cookies_key = REDIS_COOKIES_KEY
+            self._attempts_key = REDIS_AUTH_ATTEMPTS_KEY
+        else:
+            self._token_key = f"devgrab:parser:{platform}:token"
+            self._cookies_key = f"devgrab:parser:{platform}:cookies"
+            self._attempts_key = f"devgrab:parser:{platform}:auth_attempts"
 
     async def get_token(self) -> str | None:
         """Получить валидный токен (memory → Redis → Selenium auth).
@@ -72,11 +90,11 @@ class TokenManager:
             return self._token
 
         # 2. Redis cache (токен)
-        cached = await self._redis.get(REDIS_TOKEN_KEY)
+        cached = await self._redis.get(self._token_key)
         if cached:
             self._token = cached
             # Восстанавливаем cookies из Redis
-            cookies_json = await self._redis.get(REDIS_COOKIES_KEY)
+            cookies_json = await self._redis.get(self._cookies_key)
             if cookies_json:
                 try:
                     self._cookies = json.loads(cookies_json)
@@ -96,8 +114,8 @@ class TokenManager:
         """Инвалидировать текущий токен и cookies (при 401)."""
         self._token = None
         self._cookies = {}
-        await self._redis.delete(REDIS_TOKEN_KEY)
-        await self._redis.delete(REDIS_COOKIES_KEY)
+        await self._redis.delete(self._token_key)
+        await self._redis.delete(self._cookies_key)
         logger.info("Токен и cookies инвалидированы")
 
     async def _refresh_token(self) -> str | None:
@@ -143,9 +161,9 @@ class TokenManager:
                 token = cookies_dict.get("prfr_bo_tkn", "")
                 self._token = token
                 self._cookies = cookies_dict
-                await self._redis.set(REDIS_TOKEN_KEY, token, ex=self._token_ttl)
+                await self._redis.set(self._token_key, token, ex=self._token_ttl)
                 await self._redis.set(
-                    REDIS_COOKIES_KEY, json.dumps(cookies_dict), ex=self._token_ttl
+                    self._cookies_key, json.dumps(cookies_dict), ex=self._token_ttl
                 )
                 self._cb.record_success()
                 logger.info(
@@ -191,18 +209,18 @@ class TokenManager:
         new_token = cookies.get("prfr_bo_tkn")
         if new_token and new_token != self._token:
             self._token = new_token
-            await self._redis.set(REDIS_TOKEN_KEY, new_token, ex=self._token_ttl)
+            await self._redis.set(self._token_key, new_token, ex=self._token_ttl)
             logger.info("Токен обновлён из cookies ответа (TTL %d сек)", self._token_ttl)
         # Обновляем cookies в Redis
         await self._redis.set(
-            REDIS_COOKIES_KEY, json.dumps(self._cookies), ex=self._token_ttl
+            self._cookies_key, json.dumps(self._cookies), ex=self._token_ttl
         )
 
     async def set_initial_token(self, token: str) -> None:
         """Установить начальный токен из конфига (если есть)."""
         if token:
             self._token = token
-            await self._redis.set(REDIS_TOKEN_KEY, token, ex=self._token_ttl)
+            await self._redis.set(self._token_key, token, ex=self._token_ttl)
             logger.info("Начальный токен установлен из конфига")
 
     def to_dict(self) -> dict:

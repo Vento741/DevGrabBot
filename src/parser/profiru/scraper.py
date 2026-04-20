@@ -703,8 +703,11 @@ class ProfiruParser(BaseParser):
         if client_name:
             raw_parts.append(f"Клиент: {client_name}")
 
+        external_id = str(raw.get("id", ""))
         return {
-            "external_id": str(raw.get("id", "")),
+            "platform": "profiru",
+            "external_id": external_id,
+            "url": f"https://profi.ru/backoffice/n.php?o={external_id}" if external_id else None,
             "title": title,
             "description": desc,
             "budget": budget,
@@ -717,7 +720,6 @@ class ProfiruParser(BaseParser):
             "response_price": None,
             "materials": None,
             "raw_text": "\n".join(raw_parts),
-            "source": "profiru",
         }
 
     # ------------------------------------------------------------------

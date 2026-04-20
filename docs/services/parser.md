@@ -1,26 +1,72 @@
-# Parser — Парсер Профи.ру
+# Parser — Парсер фриланс-платформ (multi-platform)
 
-> **Последнее обновление:** 2026-03-25 (worker: проверка паузы через redis_client.is_parser_paused() в начале каждой итерации)
+> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — добавлен Kwork парсер, унифицирован контракт Redis dict, `run_parser_worker` запускает активные платформы через asyncio.gather)
 > **ВАЖНО:** При любых изменениях в модуле `src/parser/` — обновить этот документ!
 
 ## Назначение
 
-Парсинг заказов с Профи.ру через GraphQL API. Авторизация через Selenium. Фильтрация и дедупликация через Redis. **Resilience Layer** обеспечивает защиту от бана.
+Парсинг заказов с фриланс-платформ. Сейчас поддерживается:
+- **Profi.ru** (`src/parser/profiru/`) — GraphQL API + Selenium auth + Resilience Layer.
+- **Kwork** (`src/parser/kwork/`) — mobile API через `pykwork` + in-process rate limiter.
+
+Каждый парсер кладёт унифицированный dict в общую Redis очередь `devgrab:new_orders` с ключом `platform` ("profiru" | "kwork"). AI worker и notification worker работают с обоими источниками без изменений.
 
 ## Файлы
 
 | Файл | Назначение |
 |------|-----------|
 | `src/parser/base.py` | Абстрактный BaseParser (интерфейс) |
-| `src/parser/worker.py` | Воркер парсера (цикл + resilience) |
+| `src/parser/worker.py` | Оркестратор: запускает `run_profiru_worker` + `run_kwork_worker` через asyncio.gather по фичефлагам |
 | `src/parser/profiru/scraper.py` | Парсер Профи.ру (Selenium + GraphQL + httpx) |
-| `src/parser/profiru/filters.py` | Фильтрация по стоп-словам и возрасту |
+| `src/parser/profiru/filters.py` | Фильтрация по стоп-словам и возрасту (переиспользуется Kwork'ом) |
+| `src/parser/kwork/scraper.py` | Парсер Kwork (pykwork 0.2.0+) |
+| `src/parser/kwork/worker.py` | Упрощённый воркер Kwork (без Selenium/keep-alive) |
+| `src/parser/kwork/rate_limiter.py` | InProcessRateLimiter (sliding window, 2 RPS default) |
 | `src/parser/resilience/__init__.py` | Resilience Layer — экспорт компонентов |
 | `src/parser/resilience/circuit_breaker.py` | Circuit Breaker (3 состояния, порог ошибок) |
 | `src/parser/resilience/alert_service.py` | Алерты в Telegram с дедупликацией |
-| `src/parser/resilience/token_manager.py` | Кэш токена в Redis + backoff авторизации |
+| `src/parser/resilience/token_manager.py` | Кэш токена в Redis + backoff авторизации (опц. `platform=` для неймспейс-изоляции ключей) |
 | `src/parser/resilience/request_scheduler.py` | Jitter + адаптивные интервалы по времени суток |
 | `src/parser/resilience/health.py` | Мониторинг и метрики в Redis |
+
+## Контракт Redis dict
+
+Каждый парсер кладёт в очередь `devgrab:new_orders` dict с обязательными полями:
+
+```python
+{
+    "platform": "profiru" | "kwork",  # ОБЯЗАТЕЛЬНО
+    "external_id": "12345678",
+    "url": "https://profi.ru/backoffice/n.php?o=...",  # либо kwork.ru/projects/...
+    "title": "...",
+    "description": "...",
+    "raw_text": "...",
+    "budget": "5000 ₽" | None,
+    "materials": [...] | None,  # у Kwork всегда None
+    "last_update_date": <ts or ISO>,
+    # ...платформо-специфичные поля
+}
+```
+
+Старое поле `"source"` переименовано в `"platform"` — AI worker читает именно `platform`.
+
+## Kwork parser
+
+**Библиотека:** `kwork[proxy]>=0.2.0` (pykwork, MIT).
+
+**Авторизация:** логин + пароль (+ опционально `phone_last`). Токен кэшируется в таблице `settings` (key `kwork_token`), TTL ~30 дней. Auto-relogin встроен (`relogin_on_auth_error=True`).
+
+**Endpoint:** `client.get_projects(categories_ids=[11, ...])` → `list[WantWorker]`. Категория 11 = "Разработка и IT".
+
+**Rate limit:** 2 RPS / burst 5 по умолчанию (безопасный старт). Конфиг через `KWORK_RPS`, `KWORK_BURST`.
+
+**Дедупликация:** Redis set `devgrab:parser:kwork:seen_ids`, TTL 7 дней (`KWORK_DEDUP_TTL_SEC=604800`). На старте воркер делает **startup sweep** — засевает set текущими проектами чтобы не залить очередь при первом запуске.
+
+**Captcha:** `KworkHTTPException.error_code == 118` → парсер ставится на паузу, требуется ручная разблокировка.
+
+**403 (IP blocked):** парсер делает паузу 5 минут. Рекомендуется использовать `KWORK_PROXY=socks5://...`.
+
+**Attachments:** у Kwork проектов нет — пайплайн `materials` пропускается (поле всегда None).
 
 ---
 

@@ -1,10 +1,18 @@
 """Обработчики панели разработчика (CP-5.1, CP-5.4 — CP-5.11)."""
 import logging
+import re
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -22,7 +30,7 @@ from src.ai.context import OrderContext
 from src.core.settings_service import (
     CONFIG_FALLBACK_KEYS,
     PROMPT_KEYS,
-    add_stop_word,
+    bulk_add_stop_words,
     get_config_setting,
     get_prompt,
     get_stop_words,
@@ -30,6 +38,7 @@ from src.core.settings_service import (
     reset_prompt,
     set_prompt,
     set_setting,
+    set_stop_words,
 )
 from src.bot.states import DevPanelStates
 from src.bot.keyboards.dev_panel import (
@@ -45,6 +54,7 @@ from src.bot.keyboards.dev_panel import (
     role_select_kb,
     settings_kb,
     stack_actions_kb,
+    stop_words_clear_confirm_kb,
     stop_words_kb,
     team_list_kb,
 )
@@ -385,6 +395,26 @@ async def handle_stack_clear(
 # 3. Стоп-слова
 # ---------------------------------------------------------------------------
 
+_SW_INFO = (
+    "<i>Поиск по подстроке, без учёта регистра, в title+description заявки.</i>"
+)
+
+
+def _build_sw_header(words: list[str], page: int = 0) -> str:
+    """Сформировать заголовок экрана стоп-слов."""
+    count = len(words)
+    if count:
+        return (
+            f"<b>Стоп-слова</b> ({count}):\n\n"
+            f"{_SW_INFO}\n\n"
+            "Нажмите на слово для удаления или добавьте новое:"
+        )
+    return (
+        "<b>Стоп-слова</b>\n\nСписок пуст.\n\n"
+        f"{_SW_INFO}\n\n"
+        "Добавьте первое стоп-слово:"
+    )
+
 
 @router.callback_query(F.data == "dev:stopwords")
 async def handle_dev_stopwords(
@@ -393,7 +423,7 @@ async def handle_dev_stopwords(
     settings: Settings,
     state: FSMContext,
 ) -> None:
-    """Показать список стоп-слов (только админ)."""
+    """Показать список стоп-слов (только админ), страница 0."""
     if not _is_admin(callback.from_user.id):
         await callback.answer("Доступно только админу", show_alert=True)
         return
@@ -403,16 +433,38 @@ async def handle_dev_stopwords(
     async with session_factory() as session:
         words = await get_stop_words(session, settings)
 
-    count = len(words)
-    header = f"<b>Стоп-слова</b> ({count}):\n\n" if count else "<b>Стоп-слова</b>\n\nСписок пуст.\n\n"
-    if words:
-        header += "\n".join(f"  • {w}" for w in words) + "\n\n"
-    header += "Нажмите на слово для удаления или добавьте новое:"
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        _build_sw_header(words),
+        reply_markup=stop_words_kb(words, page=0),
+    )
+
+
+@router.callback_query(F.data.startswith("sw:page:"))
+async def handle_stop_words_page(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    """Переключить страницу списка стоп-слов."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Доступно только админу", show_alert=True)
+        return
+    await callback.answer()
+    page = int(callback.data.split("sw:page:", 1)[1])  # type: ignore[union-attr]
+
+    async with session_factory() as session:
+        words = await get_stop_words(session, settings)
 
     await callback.message.edit_text(  # type: ignore[union-attr]
-        header,
-        reply_markup=stop_words_kb(words),
+        _build_sw_header(words),
+        reply_markup=stop_words_kb(words, page=page),
     )
+
+
+@router.callback_query(F.data == "sw:noop")
+async def handle_sw_noop(callback: CallbackQuery) -> None:
+    """Заглушка для неактивной кнопки номера страницы."""
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("sw:del:"))
@@ -421,22 +473,16 @@ async def handle_sw_delete(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> None:
-    """Удалить стоп-слово."""
+    """Удалить стоп-слово и остаться на текущей (или ближайшей) странице."""
     await callback.answer()
     word = callback.data.split("sw:del:", 1)[1]  # type: ignore[union-attr]
 
     async with session_factory() as session:
         words = await remove_stop_word(session, word)
 
-    count = len(words)
-    header = f"<b>Стоп-слова</b> ({count}):\n\n" if count else "<b>Стоп-слова</b>\n\nСписок пуст.\n\n"
-    if words:
-        header += "\n".join(f"  • {w}" for w in words) + "\n\n"
-    header += "Нажмите на слово для удаления или добавьте новое:"
-
     await callback.message.edit_text(  # type: ignore[union-attr]
-        header,
-        reply_markup=stop_words_kb(words),
+        _build_sw_header(words),
+        reply_markup=stop_words_kb(words, page=0),
     )
     logger.info("Стоп-слово удалено: %s", word)
 
@@ -446,11 +492,13 @@ async def handle_sw_add_start(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-    """Начать добавление стоп-слова."""
+    """Начать добавление стоп-слов (массовый ввод)."""
     await callback.answer()
     await state.set_state(DevPanelStates.adding_stop_word)
     await callback.message.answer(  # type: ignore[union-attr]
-        "Введите стоп-слово для добавления:",
+        "Введи одно или несколько стоп-слов.\n"
+        "Разделители: запятая, перенос строки, точка с запятой.\n\n"
+        "<i>Пример:</i> <code>WordPress, Битрикс, 1С</code>",
         reply_markup=cancel_dev_kb("dev:stopwords"),
     )
 
@@ -462,28 +510,125 @@ async def process_add_stop_word(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> None:
-    """Сохранить новое стоп-слово."""
-    word = message.text.strip() if message.text else ""
-    if not word:
-        await message.answer("Пожалуйста, введите слово:")
+    """Сохранить одно или несколько новых стоп-слов (массовый ввод)."""
+    raw = message.text.strip() if message.text else ""
+    if not raw:
+        await message.answer("Пожалуйста, введите слово или список слов:")
+        return
+
+    # Разбиваем по запятой, переносу строки, точке с запятой
+    parts = re.split(r"[,\n;]+", raw)
+    new_words = [p.strip() for p in parts if p.strip()]
+
+    if not new_words:
+        await message.answer("Пожалуйста, введите хотя бы одно слово:")
         return
 
     async with session_factory() as session:
-        words = await add_stop_word(session, word)
+        # Узнаём количество до добавления
+        before_words = await get_stop_words(session, settings)
+        before_count = len(before_words)
+        words, added = await bulk_add_stop_words(session, new_words)
 
     await state.clear()
 
-    count = len(words)
-    header = f"<b>Стоп-слова</b> ({count}):\n\n"
-    if words:
-        header += "\n".join(f"  • {w}" for w in words) + "\n\n"
-    header += "Нажмите на слово для удаления или добавьте новое:"
+    after_count = len(words)
+    if added:
+        result_text = (
+            f"Добавлено {added} новых слов. "
+            f"Было {before_count}, стало {after_count}."
+        )
+    else:
+        result_text = "Все введённые слова уже есть в списке — ничего не добавлено."
 
     await message.answer(
-        header,
-        reply_markup=stop_words_kb(words),
+        f"<b>Стоп-слова</b>\n\n{result_text}",
+        reply_markup=stop_words_kb(words, page=0),
     )
-    logger.info("Добавлено стоп-слово: %s", word)
+    logger.info(
+        "Массовое добавление стоп-слов: добавлено %d из %d, всего стало %d",
+        added, len(new_words), after_count,
+    )
+
+
+@router.callback_query(F.data == "sw:export")
+async def handle_sw_export(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    """Экспортировать список стоп-слов в .txt файл (по одному слову на строку, сортировка)."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Доступно только админу", show_alert=True)
+        return
+    await callback.answer()
+
+    async with session_factory() as session:
+        words = await get_stop_words(session, settings)
+
+    if not words:
+        await callback.answer("Список стоп-слов пуст — нечего экспортировать.", show_alert=True)
+        return
+
+    sorted_words = sorted(words, key=lambda w: w.lower())
+    content = "\n".join(sorted_words).encode("utf-8")
+    filename = f"stop_words_{date.today().isoformat()}.txt"
+
+    await callback.message.answer_document(  # type: ignore[union-attr]
+        document=BufferedInputFile(content, filename=filename),
+        caption=f"Стоп-слова ({len(sorted_words)} шт.), отсортированы по алфавиту.",
+    )
+    logger.info("Экспорт стоп-слов: %d слов в %s", len(sorted_words), filename)
+
+
+@router.callback_query(F.data == "sw:clear:confirm")
+async def handle_sw_clear_confirm(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    """Показать экран подтверждения удаления всех стоп-слов."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Доступно только админу", show_alert=True)
+        return
+    await callback.answer()
+
+    async with session_factory() as session:
+        words = await get_stop_words(session, settings)
+
+    count = len(words)
+    if not count:
+        await callback.answer("Список и так пуст.", show_alert=True)
+        return
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        f"<b>Очистить все стоп-слова?</b>\n\n"
+        f"Будет удалено <b>{count}</b> слов. Отмена невозможна.",
+        reply_markup=stop_words_clear_confirm_kb(count),
+    )
+
+
+@router.callback_query(F.data == "sw:clear:do")
+async def handle_sw_clear_do(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Обнулить список стоп-слов."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Доступно только админу", show_alert=True)
+        return
+    await callback.answer()
+
+    async with session_factory() as session:
+        await set_stop_words(session, [])
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "<b>Стоп-слова</b>\n\nСписок очищен.\n\n"
+        f"{_SW_INFO}\n\n"
+        "Добавьте первое стоп-слово:",
+        reply_markup=stop_words_kb([], page=0),
+    )
+    logger.info("tg_id=%s очистил все стоп-слова", callback.from_user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +1079,104 @@ async def handle_dev_settings(
     )
 
 
+@router.callback_query(F.data == "dev:platforms")
+async def handle_dev_platforms(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    state: FSMContext,
+) -> None:
+    """Показать экран выбора платформ для подписки."""
+    await state.clear()
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(TeamMember).where(TeamMember.tg_id == user_id)
+        )
+        member = result.scalar_one_or_none()
+
+    if not member:
+        await callback.answer("Вы не в команде.", show_alert=True)
+        return
+
+    from src.bot.keyboards.dev_panel import platforms_kb
+    from src.bot.utils.platforms import ALL_PLATFORMS, get_platform_label
+
+    user_platforms = member.platforms or list(ALL_PLATFORMS)
+    enabled_labels = [
+        get_platform_label(p) for p in ALL_PLATFORMS if p in user_platforms
+    ]
+    enabled_str = ", ".join(enabled_labels) if enabled_labels else "ничего"
+
+    text = (
+        "<b>Платформы</b>\n\n"
+        "Выберите, с каких площадок получать заявки. Нажмите на платформу — "
+        "она будет добавлена или убрана из подписки.\n\n"
+        f"<b>Сейчас подписаны:</b> {enabled_str}\n\n"
+        "Если подписок нет — уведомлений о новых заявках не будет."
+    )
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        reply_markup=platforms_kb(user_platforms),
+    )
+
+
+@router.callback_query(F.data.startswith("platforms:toggle:"))
+async def handle_dev_platforms_toggle(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    state: FSMContext,
+) -> None:
+    """Переключить подписку на платформу (toggle)."""
+    await callback.answer()
+    user_id = callback.from_user.id
+    platform = callback.data.split(":", 2)[2] if callback.data else ""
+
+    from src.bot.utils.platforms import ALL_PLATFORMS
+    if platform not in ALL_PLATFORMS:
+        await callback.answer("Неизвестная платформа.", show_alert=True)
+        return
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(TeamMember).where(TeamMember.tg_id == user_id)
+        )
+        member = result.scalar_one_or_none()
+        if not member:
+            await callback.answer("Вы не в команде.", show_alert=True)
+            return
+
+        current = list(member.platforms or list(ALL_PLATFORMS))
+        if platform in current:
+            current.remove(platform)
+            action = "отключена"
+        else:
+            current.append(platform)
+            action = "включена"
+
+        member.platforms = current
+        await session.commit()
+
+    from src.bot.keyboards.dev_panel import platforms_kb
+    from src.bot.utils.platforms import get_platform_label
+
+    enabled_labels = [
+        get_platform_label(p) for p in ALL_PLATFORMS if p in current
+    ]
+    enabled_str = ", ".join(enabled_labels) if enabled_labels else "ничего"
+
+    text = (
+        "<b>Платформы</b>\n\n"
+        f"✅ {get_platform_label(platform)} — {action}.\n\n"
+        f"<b>Сейчас подписаны:</b> {enabled_str}"
+    )
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        reply_markup=platforms_kb(current),
+    )
+
+
 @router.callback_query(F.data == "dev:toggle_notify")
 async def handle_toggle_notify(
     callback: CallbackQuery,
@@ -1251,8 +1494,11 @@ async def handle_dev_order_detail(
     price_display = _format_price_range(ctx.price_min, ctx.price_max, fallback="—")
     response_price_str = f"{order.response_price} руб." if order.response_price else "—"
 
+    from src.bot.utils.platforms import get_platform_label
+    platform_label = get_platform_label(getattr(order, "platform", None))
     text = (
         f"<b>Заявка:</b> {order.external_id} — {order.title}\n"
+        f"<b>Источник:</b> {platform_label}\n"
         f"<b>Статус:</b> {status_badge}\n\n"
     )
 
@@ -1311,13 +1557,23 @@ async def handle_dev_order_detail(
     if assignment.status in (AssignmentStatus.pending, AssignmentStatus.editing):
         # Заявка ещё редактируется — полная review-клавиатура
         text += "\n\nОтредактируйте параметры или утвердите отклик:"
-        kb = review_actions_kb(assignment.id, order.id, order.external_id)
+        kb = review_actions_kb(
+            assignment.id, order.id, order.external_id,
+            platform=getattr(order, "platform", None),
+        )
     elif assignment.status == AssignmentStatus.approved:
         # Утверждена, ждёт PM
-        kb = approved_kb(order.external_id, order_id=order.id)
+        kb = approved_kb(
+            order.external_id, order_id=order.id,
+            platform=getattr(order, "platform", None),
+        )
     else:
         # sent / in_progress / cancelled / etc — только просмотр
-        kb = order_detail_kb(order.id, order.external_id, has_materials=bool(order.materials))
+        kb = order_detail_kb(
+            order.id, order.external_id,
+            has_materials=bool(order.materials),
+            platform=getattr(order, "platform", None),
+        )
 
     await callback.message.edit_text(  # type: ignore[union-attr]
         text,

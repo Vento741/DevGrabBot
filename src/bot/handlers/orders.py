@@ -259,7 +259,10 @@ async def handle_take_order(
     await callback.bot.send_message(  # type: ignore[union-attr]
         chat_id=user.id,
         text=review_text,
-        reply_markup=review_actions_kb(assignment.id, order_id, order.external_id),
+        reply_markup=review_actions_kb(
+            assignment.id, order_id, order.external_id,
+            platform=getattr(order, "platform", None),
+        ),
     )
 
 

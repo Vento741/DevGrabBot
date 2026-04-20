@@ -28,7 +28,38 @@ logger = logging.getLogger(__name__)
 
 
 async def run_parser_worker(settings: Settings) -> None:
-    """Запустить воркер парсинга с Resilience Layer.
+    """Запустить все активные парсеры параллельно.
+
+    Список платформ определяется фичефлагами в Settings:
+    - PROFIRU_ENABLED=true → ProfiruParser
+    - KWORK_ENABLED=true   → KworkParser
+    """
+    tasks: list[asyncio.Task] = []
+
+    if settings.profiru_enabled:
+        tasks.append(asyncio.create_task(run_profiru_worker(settings)))
+    else:
+        logger.info("Parser Profi.ru отключён (PROFIRU_ENABLED=false)")
+
+    if settings.kwork_enabled:
+        try:
+            from src.parser.kwork.worker import run_kwork_worker
+            tasks.append(asyncio.create_task(run_kwork_worker(settings)))
+        except ImportError as exc:
+            logger.error("Не удалось импортировать Kwork worker: %s", exc)
+    else:
+        logger.info("Parser Kwork отключён (KWORK_ENABLED=false)")
+
+    if not tasks:
+        logger.error("Все парсеры отключены — воркер завершает работу")
+        return
+
+    logger.info("Запущено %d парсерных воркеров параллельно", len(tasks))
+    await asyncio.gather(*tasks)
+
+
+async def run_profiru_worker(settings: Settings) -> None:
+    """Запустить воркер парсинга Профи.ру с Resilience Layer.
 
     Цикл: scheduler.delay → CB check → token → fetch → filter → dedup → push.
     """
@@ -69,6 +100,7 @@ async def run_parser_worker(settings: Settings) -> None:
         token_ttl_sec=settings.parser_token_ttl_sec,
         max_auth_attempts=settings.parser_max_auth_attempts,
         auth_cooldown_sec=settings.parser_auth_cooldown_sec,
+        platform="profiru",
     )
     scheduler = RequestScheduler(
         base_interval_sec=settings.parse_interval_sec,

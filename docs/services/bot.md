@@ -1,7 +1,16 @@
 # Bot — Telegram бот (aiogram 3)
 
-> **Последнее обновление:** 2026-03-25 (manager_panel: toggle доступности парсера; manager_main_menu_kb is_paused param; RedisClient в workflow_data dispatcher)
+> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — кнопка "Платформы" в /dev и /manager, platform badges в карточках заявок, динамический URL builder, фильтрация нотификаций по платформам; UX-улучшения стоп-слов — массовый ввод, пагинация, экспорт в .txt, очистка)
 > **ВАЖНО:** При любых изменениях в модуле `src/bot/` — обновить этот документ!
+
+## v2.4 Multi-platform UI (2026-04-20)
+
+- **Кнопка "Платформы"** в `/dev` и `/manager` меню → экран с чекбокс-кнопками `✅/☐ 🇷🇺 Профи.ру`, `✅/☐ 💼 Kwork`. Callback: `platforms:toggle:{platform}` (dev), `mgr_platforms:toggle:{platform}` (manager). Хранится в `TeamMember.platforms`.
+- **Источник в нотификации:** строка `<b>Источник:</b> 🇷🇺 Профи.ру` (или Kwork) добавлена в `format_order_notification`, карточку dev review, карточку PM, детали заказа в dev panel.
+- **Иконки платформ в списках заявок** — `🇷🇺 #123` / `💼 #456` в `orders_list_kb` и списках manager panel.
+- **Динамический URL** — `src/bot/utils/platforms.py`: `get_order_url(platform, external_id)`. Кнопки "Открыть на Профи.ру"/"Открыть на Kwork" собираются динамически из `order.platform`.
+- **Фильтрация нотификаций по платформе** — `is_platform_enabled_for_user` в `notification.py`: dev не получит заявку с платформы, на которую не подписан.
+- Новый utility-модуль: `src/bot/utils/platforms.py` — `ALL_PLATFORMS`, `PLATFORM_LABELS`, `PLATFORM_BADGES`, `get_order_url`, `get_platform_label`, `get_platform_badge`, `get_platform_name`, `is_platform_enabled_for_user`.
 
 ## Назначение
 
@@ -122,9 +131,14 @@ asyncio.gather(
 | `stack:edit_primary` | editing_primary_stack | Ввод primary стека через запятую |
 | `stack:edit_secondary` | editing_secondary_stack | Ввод secondary стека через запятую |
 | `stack:clear` | — | Очистить stack_priority и tech_stack |
-| `dev:stopwords` | — | Список стоп-слов |
-| `sw:del:{word}` | — | Удалить стоп-слово |
-| `sw:add` | adding_stop_word | Добавить стоп-слово |
+| `dev:stopwords` | — | Список стоп-слов (стр. 0), шапка с подсказкой о семантике поиска |
+| `sw:del:{word}` | — | Удалить стоп-слово, вернуться на стр. 0 |
+| `sw:page:{n}` | — | Перейти на страницу n (0-based), 12 слов на страницу |
+| `sw:noop` | — | Заглушка кнопки «Стр. X/Y» (не реагирует) |
+| `sw:add` | adding_stop_word | Массовый ввод стоп-слов: разделители `,` / `\n` / `;` |
+| `sw:export` | — | Скачать все стоп-слова как .txt файл (сортировка по алфавиту) |
+| `sw:clear:confirm` | — | Экран подтверждения удаления всего списка |
+| `sw:clear:do` | — | Обнулить список стоп-слов через set_stop_words(session, []) |
 | `dev:prompts` | — | Список промптов |
 | `prompt:{key}` | — | Просмотр промпта (custom/default) |
 | `prompt:edit:{key}` | editing_prompt | Редактировать промпт |
@@ -150,6 +164,7 @@ asyncio.gather(
 - Промпты: truncate до 3900 символов + "..." перед отображением.
 - Статистика: использует `analytics.get_developer_stats(session, dev_id, days)` и `get_system_stats(session)` для отображения за 7 дн. и всё время.
 - `dev:toggle_notify`: переключает флаг `notify_assignments` разработчика (уведомления о новых назначениях от других девов).
+- Стоп-слова: `_SW_PAGE_SIZE = 12`, пагинация через `sw:page:{n}`. Массовый ввод (`adding_stop_word`) использует `bulk_add_stop_words()` из settings_service — дедупликация case-insensitive, возвращает (список, кол-во_добавленных). Экспорт: `BufferedInputFile` с UTF-8 контентом, имя файла `stop_words_YYYY-MM-DD.txt`. Очистка: двухэтапная — сначала `sw:clear:confirm` показывает количество слов, затем `sw:clear:do` вызывает `set_stop_words(session, [])`. Шапка экрана содержит подсказку о семантике: «Поиск по подстроке, без учёта регистра, в title+description заявки».
 
 ### Панель менеджера (manager_panel.py) — CP-6.1, CP-6.4–CP-6.12
 
@@ -380,7 +395,8 @@ Terminal state badge с иконкой статуса (для sent/in_progress/c
 |---------|---------|----------------|
 | `dev_main_menu_kb()` | Главное меню панели | `dev:` |
 | `stack_actions_kb()` | Действия с личным стеком | `stack:` |
-| `stop_words_kb(words)` | Стоп-слова + удаление (2 в ряд) | `sw:del:`, `sw:add` |
+| `stop_words_kb(words, page=0)` | Стоп-слова + удаление (2 в ряд), пагинация (12/стр.), «Добавить», «Экспорт», «Очистить всё» | `sw:del:`, `sw:page:`, `sw:noop`, `sw:add`, `sw:export`, `sw:clear:confirm` |
+| `stop_words_clear_confirm_kb(count)` | Подтверждение очистки списка | `sw:clear:do`, `dev:stopwords` |
 | `prompts_list_kb()` | Список промптов (analyze/response/roadmap) | `prompt:` |
 | `prompt_actions_kb(prompt_key)` | Редактировать / сбросить промпт | `prompt:edit:`, `prompt:reset:` |
 | `team_list_kb(members, show_add)` | Список участников команды | `team:member:`, `team:add` |

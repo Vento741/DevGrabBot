@@ -15,6 +15,11 @@ from src.core.models import TeamMember, TeamRole, Order, OrderNotification, Orde
 from src.core.redis import RedisClient
 from src.bot.handlers.orders import format_price_range, relevance_bar
 from src.bot.services.matching import format_matches_block, match_developers
+from src.bot.utils.platforms import (
+    get_order_url,
+    get_platform_label,
+    is_platform_enabled_for_user,
+)
 
 # TTL-кэш для активных разработчиков (избегаем запрос к БД на каждое уведомление)
 _DEV_CACHE_TTL = 60  # секунд
@@ -146,8 +151,12 @@ def format_order_notification(data: dict, matches: list | None = None) -> str:
     time_ago = _format_order_time(raw_date)
     time_line = f"\U0001f552 Заказ оставлен {time_ago}\n" if time_ago else ""
 
+    platform = data.get("platform", "profiru")
+    platform_label = get_platform_label(platform)
+
     return (
         f"<b>Новая заявка</b> | #{data.get('external_id', '?')}\n"
+        f"<b>Источник:</b> {platform_label}\n"
         f"<b>{data.get('title', '')}</b>\n"
         f"{time_line}\n"
         f"<b>Выжимка:</b>\n{analysis.get('summary', 'Нет данных')}\n\n"
@@ -169,11 +178,15 @@ def format_order_notification(data: dict, matches: list | None = None) -> str:
 
 
 def order_actions_keyboard(
-    order_id: int, external_id: str, has_materials: bool = False,
+    order_id: int,
+    external_id: str,
+    has_materials: bool = False,
+    platform: str = "profiru",
 ):
     """Inline-клавиатура под заявкой в группе."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+    link_url = get_order_url(platform, external_id) or ""
     rows = [
         [
             InlineKeyboardButton(
@@ -189,7 +202,7 @@ def order_actions_keyboard(
         [
             InlineKeyboardButton(
                 text="Ссылка",
-                url=f"https://profi.ru/backoffice/n.php?o={external_id}",
+                url=link_url or "https://profi.ru/",
                 style="primary",
             ),
             InlineKeyboardButton(
@@ -283,13 +296,26 @@ async def run_notification_worker(settings: Settings):
                     continue
 
                 has_materials = bool(data.get("materials"))
-                keyboard = order_actions_keyboard(order_id, external_id, has_materials=has_materials)
+                order_platform = data.get("platform", "profiru")
+                keyboard = order_actions_keyboard(
+                    order_id, external_id,
+                    has_materials=has_materials,
+                    platform=order_platform,
+                )
 
                 # Отправляем каждому совпавшему dev'у в личку
                 sent_count = 0
                 async with session_factory() as session:
                     for dev, score, matched_techs in matches:
                         if not getattr(dev, "notify_assignments", True):
+                            continue
+                        # v2.4: проверка что dev подписан на платформу заявки
+                        dev_platforms = getattr(dev, "platforms", None)
+                        if not is_platform_enabled_for_user(dev_platforms, order_platform):
+                            logger.debug(
+                                "Dev %s не подписан на %s — пропуск",
+                                dev.name, order_platform,
+                            )
                             continue
 
                         # Персональный текст с инфой о матче

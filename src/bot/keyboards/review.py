@@ -1,6 +1,25 @@
 """Клавиатуры для редактирования и утверждения отклика."""
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.utils.platforms import get_order_url, get_platform_name
+
+
+def _open_platform_button(
+    platform: str | None, external_id: str | None
+) -> InlineKeyboardButton | None:
+    """Построить кнопку «Открыть на <платформа>» или вернуть None."""
+    if not external_id:
+        return None
+    url = get_order_url(platform or "profiru", external_id)
+    if not url:
+        return None
+    name = get_platform_name(platform or "profiru")
+    return InlineKeyboardButton(
+        text=f"Открыть на {name}",
+        url=url,
+        style="primary",
+    )
+
 
 def cancel_review_kb(assignment_id: int) -> InlineKeyboardMarkup:
     """Кнопка «Отменить» для FSM-состояний редактирования отклика."""
@@ -18,6 +37,7 @@ def review_actions_kb(
     assignment_id: int,
     order_id: int | None = None,
     external_id: str | None = None,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Клавиатура редактирования отклика в личке разработчика."""
     rows: list[list[InlineKeyboardButton]] = [
@@ -43,7 +63,6 @@ def review_actions_kb(
         ],
     ]
 
-    # Кнопки Pre Roadmap и Оригинал
     if order_id is not None:
         rows.append([
             InlineKeyboardButton(
@@ -56,15 +75,9 @@ def review_actions_kb(
             ),
         ])
 
-    # Ссылка на Профи.ру
-    if external_id:
-        rows.append([
-            InlineKeyboardButton(
-                text="Открыть на Профи.ру",
-                url=f"https://profi.ru/backoffice/n.php?o={external_id}",
-                style="primary",
-            ),
-        ])
+    btn = _open_platform_button(platform, external_id)
+    if btn is not None:
+        rows.append([btn])
 
     rows.append([
         InlineKeyboardButton(
@@ -94,6 +107,7 @@ def approved_kb(
     external_id: str | None = None,
     manager_tg_username: str | None = None,
     order_id: int | None = None,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Клавиатура после утверждения отклика: статус + связь с PM + оригинал."""
     rows: list[list[InlineKeyboardButton]] = [
@@ -113,7 +127,6 @@ def approved_kb(
             ),
         ])
 
-    # Оригинал заявки + ссылка на Профи.ру
     extra_row: list[InlineKeyboardButton] = []
     if order_id is not None:
         extra_row.append(
@@ -122,12 +135,11 @@ def approved_kb(
                 callback_data=f"original:{order_id}",
             ),
         )
-    if external_id:
+    btn = _open_platform_button(platform, external_id)
+    if btn is not None:
+        # В этом ряду стиль не нужен — кнопка второстепенная.
         extra_row.append(
-            InlineKeyboardButton(
-                text="Открыть на Профи.ру",
-                url=f"https://profi.ru/backoffice/n.php?o={external_id}",
-            ),
+            InlineKeyboardButton(text=btn.text, url=btn.url),
         )
     if extra_row:
         rows.append(extra_row)
@@ -138,25 +150,21 @@ def approved_kb(
 def copy_response_kb(
     response_id: int,
     external_id: str | None = None,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Кнопки для менеджера: копировать отклик + ссылка на Профи.ру."""
+    """Кнопки для менеджера: копировать отклик + ссылка на платформу."""
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="\U0001f4cb \u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043e\u0442\u043a\u043b\u0438\u043a",
+                text="\U0001f4cb Скопировать отклик",
                 callback_data=f"copy_response:{response_id}",
             ),
         ],
     ]
 
-    if external_id:
-        rows.append([
-            InlineKeyboardButton(
-                text="Открыть на Профи.ру",
-                url=f"https://profi.ru/backoffice/n.php?o={external_id}",
-                style="primary",
-            ),
-        ])
+    btn = _open_platform_button(platform, external_id)
+    if btn is not None:
+        rows.append([btn])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -168,11 +176,9 @@ def pm_response_kb(
     hide_sent: bool = False,
     hide_in_progress: bool = False,
     hide_cancel: bool = False,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура для PM после утверждения отклика разработчиком.
-
-    Кнопки скрываются прогрессивно по мере продвижения по воронке.
-    """
+    """Клавиатура для PM после утверждения отклика разработчиком."""
     rows: list[list[InlineKeyboardButton]] = []
 
     if not hide_sent:
@@ -198,11 +204,9 @@ def pm_response_kb(
         callback_data=f"copy_response:{response_id}",
     )])
 
-    if external_id:
-        rows.append([InlineKeyboardButton(
-            text="Открыть на Профи.ру",
-            url=f"https://profi.ru/backoffice/n.php?o={external_id}",
-        )])
+    btn = _open_platform_button(platform, external_id)
+    if btn is not None:
+        rows.append([InlineKeyboardButton(text=btn.text, url=btn.url)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -211,6 +215,7 @@ def pm_status_badge_kb(
     status_text: str,
     response_id: int,
     external_id: str | None = None,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Клавиатура-бейдж со статусом (финальное состояние)."""
     rows: list[list[InlineKeyboardButton]] = [
@@ -220,9 +225,7 @@ def pm_status_badge_kb(
             callback_data=f"copy_response:{response_id}",
         )],
     ]
-    if external_id:
-        rows.append([InlineKeyboardButton(
-            text="Открыть на Профи.ру",
-            url=f"https://profi.ru/backoffice/n.php?o={external_id}",
-        )])
+    btn = _open_platform_button(platform, external_id)
+    if btn is not None:
+        rows.append([InlineKeyboardButton(text=btn.text, url=btn.url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)

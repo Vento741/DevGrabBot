@@ -63,8 +63,32 @@ def manager_main_menu_kb(is_paused: bool = False) -> InlineKeyboardMarkup:
                     callback_data="mgr:analytics",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="Платформы",
+                    callback_data="mgr:platforms",
+                ),
+            ],
         ],
     )
+
+
+def manager_platforms_kb(user_platforms: list[str]) -> InlineKeyboardMarkup:
+    """Клавиатура выбора платформ для подписки менеджера (чекбокс-стиль)."""
+    from src.bot.utils.platforms import ALL_PLATFORMS, get_platform_label
+
+    enabled = {p.lower() for p in (user_platforms or [])}
+    rows: list[list[InlineKeyboardButton]] = []
+    for platform in ALL_PLATFORMS:
+        mark = "\u2705" if platform in enabled else "\u2610"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{mark} {get_platform_label(platform)}",
+                callback_data=f"mgr_platforms:toggle:{platform}",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="<- Назад", callback_data="mgr:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def responses_filter_kb() -> InlineKeyboardMarkup:

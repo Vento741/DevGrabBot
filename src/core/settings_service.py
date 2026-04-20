@@ -119,6 +119,31 @@ async def add_stop_word(session: AsyncSession, word: str) -> list[str]:
     return current
 
 
+async def bulk_add_stop_words(
+    session: AsyncSession, new_words: list[str]
+) -> tuple[list[str], int]:
+    """Добавить несколько стоп-слов атомарно (одна запись в БД).
+
+    Дедупликация case-insensitive: новые слова сравниваются с уже имеющимися
+    без учёта регистра, но сохраняются в исходном регистре.
+
+    Возвращает (обновлённый_список, количество_добавленных).
+    """
+    current = await _load_stop_words_raw(session)
+    existing_lower = {w.lower() for w in current}
+    added = 0
+    for word in new_words:
+        if word.lower() not in existing_lower:
+            current.append(word)
+            existing_lower.add(word.lower())
+            added += 1
+    if added:
+        await set_setting(
+            session, _STOP_WORDS_KEY, json.dumps(current, ensure_ascii=False)
+        )
+    return current, added
+
+
 async def remove_stop_word(session: AsyncSession, word: str) -> list[str]:
     """Удалить стоп-слово из списка.
 

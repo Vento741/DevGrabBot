@@ -1,7 +1,45 @@
 # Infrastructure — Инфраструктура и деплой
 
-> **Последнее обновление:** 2026-03-05
+> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform: добавлены KWORK_* переменные, зависимость `kwork[proxy]>=0.2.0`, миграция `3f8a2b1c4d7e`)
 > **ВАЖНО:** При любых изменениях в инфраструктуре — обновить этот документ!
+
+## v2.4 Deploy (2026-04-20)
+
+Команды на сервере для развёртывания v2.4:
+
+```bash
+cd /var/www/BOTS/DevGrabBot
+git pull origin main
+pip install -e . --break-system-packages   # ставит kwork[proxy]>=0.2.0
+alembic upgrade head                        # применяет 3f8a2b1c4d7e_v2_4_multiplatform
+# добавить в .env:
+#   KWORK_LOGIN=web-dusha
+#   KWORK_PASSWORD=<из memory>
+#   KWORK_ENABLED=true
+sudo systemctl restart devgrabbot devgrab-parser devgrab-scheduler
+sudo journalctl -u devgrab-parser -f       # проверить что оба парсера стартуют
+```
+
+Парсер Kwork работает в том же systemd-юните что и Profi.ru (`devgrab-parser.service`) — оба запускаются как asyncio-задачи в одном процессе через `asyncio.gather()`. Отдельного юнита создавать не нужно.
+
+**Новые env-переменные (`.env`)**:
+
+```bash
+# Profi.ru (добавлен enabled-флаг)
+PROFIRU_ENABLED=true
+
+# Kwork (v2.4)
+KWORK_LOGIN=web-dusha
+KWORK_PASSWORD=<secret>           # НЕ коммитить в git
+KWORK_PHONE_LAST=                 # опционально — последние 4 цифры
+KWORK_ENABLED=true
+KWORK_CATEGORIES=11               # 11 = Разработка и IT
+KWORK_RPS=2
+KWORK_BURST=5
+KWORK_POLL_INTERVAL_SEC=120
+KWORK_PROXY=                      # опционально: socks5://user:pass@host:port
+KWORK_DEDUP_TTL_SEC=604800        # 7 дней
+```
 
 ## Архитектура деплоя
 

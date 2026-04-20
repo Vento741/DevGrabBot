@@ -1,6 +1,8 @@
 """Клавиатуры для заявок в групповом чате."""
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.utils.platforms import get_order_url
+
 
 def order_actions_kb(order_id: int) -> InlineKeyboardMarkup:
     """Клавиатура с действиями для новой заявки в группе."""
@@ -24,8 +26,12 @@ def order_taken_kb(
     order_id: int,
     external_id: str,
     developer_username: str,
+    platform: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Клавиатура после взятия заявки: красная кнопка 'Взято' + ссылки."""
+    link_url = get_order_url(platform or "profiru", external_id) or (
+        f"https://profi.ru/backoffice/n.php?o={external_id}"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -38,7 +44,7 @@ def order_taken_kb(
             [
                 InlineKeyboardButton(
                     text="Ссылка",
-                    url=f"https://profi.ru/backoffice/n.php?o={external_id}",
+                    url=link_url,
                 ),
                 InlineKeyboardButton(
                     text="Оригинал",
