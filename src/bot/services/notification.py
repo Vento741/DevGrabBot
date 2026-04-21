@@ -259,9 +259,12 @@ def format_group_card(analyzed: dict) -> str:
     complexity = analysis.get("complexity") or ""
     complexity_block = f"\n<b>🧩 Сложность:</b> {complexity}" if complexity else ""
 
-    # Релевантность
+    # Релевантность (0-100, с визуальным лейблом HIGH/MEDIUM/LOW)
     relevance = analysis.get("relevance_score")
-    relevance_block = f"\n<b>🎯 Релевантность:</b> {relevance}/10" if relevance is not None else ""
+    relevance_block = (
+        f"\n<b>🎯 Релевантность:</b> {relevance_bar(int(relevance))}"
+        if relevance is not None else ""
+    )
 
     # Материалы
     materials = analyzed.get("materials") or []
