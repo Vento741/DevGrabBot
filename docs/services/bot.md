@@ -1,7 +1,24 @@
 # Bot — Telegram бот (aiogram 3)
 
-> **Последнее обновление:** 2026-04-21 (v2.5 access control — глобальные фильтры только для manager)
+> **Последнее обновление:** 2026-04-21 (v2.5 bugfix — анализ в DM, расширенная карточка группы, atomic group_message_id)
 > **ВАЖНО:** При любых изменениях в модуле `src/bot/` — обновить этот документ!
+
+## v2.5 Bugfix — pmg:* handlers + расширенная карточка + atomic group_message_id (2026-04-21)
+
+### Фикс 1: `_is_pm_or_admin` и pmg:* handlers (`src/bot/handlers/group_pm.py`)
+- **`_is_pm_or_admin(member, tg_id=None)`** теперь принимает два аргумента: сверяет `tg_id` с `_ADMIN_TG_ID` (загружается из `.env` через `Settings()` один раз на старте), а также проверяет `member.role == TeamRole.manager`. Убрана ложная проверка `getattr(member, "is_admin", False)` — поля `is_admin` в модели нет.
+- Все пять pmg:* handlers (`handle_pm_group_take`, `handle_pm_group_analysis`, `handle_pm_group_materials`, `handle_pm_group_hide`, `handle_pm_group_info`) теперь: (1) сначала проверяют доступ, (2) потом выполняют бизнес-логику, (3) в конце `callback.answer()`. Убраны преждевременные вызовы `callback.answer()` до проверки доступа.
+- `handle_pm_group_analysis`: добавлен `parse_mode="HTML"` в `bot.send_message`, ловятся специфичные `TelegramForbiddenError`/`TelegramBadRequest` с понятным alert-сообщением.
+- Добавлен импорт `from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest`.
+
+### Фикс 2: Расширенная карточка `format_group_card` (`src/bot/services/notification.py`)
+- Карточка теперь содержит: заголовок + бюджет, оригинал задачи (до 800 симв., курсивом), AI-резюме, стек, нашу оценку, сроки, сложность, релевантность, материалы (если есть), цену отклика, возраст заявки.
+- Жёсткий лимит 2900 символов (с обрезкой `...`).
+
+### Фикс 3: Atomic `_publish_to_group` (`src/bot/services/notification.py`)
+- Вместо `select(Order) + order.group_message_id = msg.message_id` используется `UPDATE Order SET group_message_id=? WHERE id=? AND group_message_id IS NULL` (SQLAlchemy `update()`).
+- Если `rowcount == 0` (race: `pmg:hide` успел раньше) — новое сообщение немедленно удаляется из группы, функция возвращает `None`.
+- Добавлен импорт `update` из `sqlalchemy`.
 
 ## v2.5 Access Control — Глобальные фильтры только для manager (2026-04-21)
 

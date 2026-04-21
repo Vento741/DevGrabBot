@@ -3,11 +3,13 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import CallbackQuery, InputMediaPhoto
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from src.core.config import Settings
 from src.core.models import (
     AiAnalysis,
     AssignmentStatus,
@@ -23,10 +25,17 @@ from src.bot.utils.platforms import get_order_url, get_platform_label
 logger = logging.getLogger(__name__)
 router = Router(name="group_pm")
 
+# Кэшируем admin_tg_id на старте — Settings() читает .env один раз
+_ADMIN_TG_ID: int = Settings().admin_tg_id
 
-def _is_pm_or_admin(member: TeamMember) -> bool:
-    """Проверить, является ли участник менеджером или админом."""
-    return member.role == TeamRole.manager or getattr(member, "is_admin", False)
+
+def _is_pm_or_admin(member: TeamMember | None, tg_id: int | None = None) -> bool:
+    """PM (TeamRole.manager) или админ (ADMIN_TG_ID из .env)."""
+    if tg_id is not None and tg_id == _ADMIN_TG_ID:
+        return True
+    if member and member.role == TeamRole.manager:
+        return True
+    return False
 
 
 async def _get_member(session: AsyncSession, tg_id: int) -> TeamMember | None:
@@ -99,20 +108,17 @@ async def handle_pm_group_take(
     Создаёт OrderAssignment(status=approved), обновляет Order.status=assigned,
     заменяет клавиатуру в группе, отправляет уведомление в личку PM.
     """
-    await callback.answer()
-    order_id = int(callback.data.split(":")[2])
     user = callback.from_user
+    if not user:
+        await callback.answer()
+        return
+
+    order_id = int(callback.data.split(":")[2])
 
     async with session_factory() as session:
         member = await _get_member(session, user.id)
-        if not member:
-            await callback.answer("Вы не зарегистрированы в команде.", show_alert=True)
-            return
-
-        if not _is_pm_or_admin(member):
-            await callback.answer(
-                "Недоступно. Откликнитесь через DM.", show_alert=True,
-            )
+        if not _is_pm_or_admin(member, user.id):
+            await callback.answer("Недоступно. Откликнитесь через DM.", show_alert=True)
             return
 
         # Загружаем заявку с назначениями
@@ -202,19 +208,17 @@ async def handle_pm_group_analysis(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Показать полный AI-анализ в личку PM — чтобы не засорять группу."""
-    await callback.answer("Анализ отправлен вам в личку.")
-    order_id = int(callback.data.split(":")[2])
     user = callback.from_user
+    if not user:
+        await callback.answer()
+        return
+
+    order_id = int(callback.data.split(":")[2])
 
     async with session_factory() as session:
         member = await _get_member(session, user.id)
-        if not member:
-            return
-
-        if not _is_pm_or_admin(member):
-            await callback.answer(
-                "Недоступно. Откликнитесь через DM.", show_alert=True,
-            )
+        if not _is_pm_or_admin(member, user.id):
+            await callback.answer("Недоступно. Откликнитесь через DM.", show_alert=True)
             return
 
         order_result = await session.execute(
@@ -230,18 +234,27 @@ async def handle_pm_group_analysis(
         analysis = order.analyses[0] if order.analyses else None
         text = _format_full_analysis(order, analysis)
 
-    # Разбиваем на части если длиннее 4096 символов
+    # Разбиваем на части если длиннее 4096 символов — parse_mode="HTML" обязателен
     try:
         if len(text) <= 4096:
-            await bot.send_message(chat_id=user.id, text=text)
+            await bot.send_message(chat_id=user.id, text=text, parse_mode="HTML")
         else:
             for i in range(0, len(text), 4096):
-                await bot.send_message(chat_id=user.id, text=text[i:i + 4096])
-    except Exception:
-        logger.warning("Не удалось отправить анализ в DM PM-у для заявки #%s", order_id)
-        await callback.answer(
-            "Сначала напишите боту в личку /start", show_alert=True,
+                await bot.send_message(chat_id=user.id, text=text[i:i + 4096], parse_mode="HTML")
+        await callback.answer("Анализ отправлен вам в личку.")
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        logger.warning(
+            "Не удалось отправить анализ в DM PM-у для заявки #%s: %s", order_id, exc,
         )
+        await callback.answer(
+            "Сначала напишите боту в личку: /start, затем повторите.",
+            show_alert=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Неожиданная ошибка при отправке анализа заявки #%s: %s", order_id, exc,
+        )
+        await callback.answer("Не удалось отправить анализ.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("pmg:materials:"))
@@ -251,18 +264,17 @@ async def handle_pm_group_materials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Отправить материалы заявки в личку PM."""
-    order_id = int(callback.data.split(":")[2])
     user = callback.from_user
+    if not user:
+        await callback.answer()
+        return
+
+    order_id = int(callback.data.split(":")[2])
 
     async with session_factory() as session:
         member = await _get_member(session, user.id)
-        if not member:
-            return
-
-        if not _is_pm_or_admin(member):
-            await callback.answer(
-                "Недоступно. Откликнитесь через DM.", show_alert=True,
-            )
+        if not _is_pm_or_admin(member, user.id):
+            await callback.answer("Недоступно. Откликнитесь через DM.", show_alert=True)
             return
 
         order_result = await session.execute(
@@ -314,18 +326,17 @@ async def handle_pm_group_hide(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Удалить карточку заявки из группового чата. Только PM/admin."""
-    order_id = int(callback.data.split(":")[2])
     user = callback.from_user
+    if not user:
+        await callback.answer()
+        return
+
+    order_id = int(callback.data.split(":")[2])
 
     async with session_factory() as session:
         member = await _get_member(session, user.id)
-        if not member:
-            return
-
-        if not _is_pm_or_admin(member):
-            await callback.answer(
-                "Недоступно. Откликнитесь через DM.", show_alert=True,
-            )
+        if not _is_pm_or_admin(member, user.id):
+            await callback.answer("Недоступно. Откликнитесь через DM.", show_alert=True)
             return
 
         # Сбрасываем group_message_id в Order

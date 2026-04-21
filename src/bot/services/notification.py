@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from src.core.config import Settings
 from src.core.database import create_engine, create_session_factory
@@ -179,56 +179,108 @@ def format_order_notification(data: dict, matches: list | None = None) -> str:
 
 
 def format_group_card(analyzed: dict) -> str:
-    """Короткая карточка заявки для публикации в групповом чате (до 800 символов).
+    """Расширенная карточка заявки для публикации в групповом чате.
 
-    Формат:
-    <b>{badge} #{external_id}</b>
-    {title_truncated}
-
-    Бюджет: {budget}
-    Время: {time_label}
-    Релевантность: {score}/10
-    Материалы: N шт.  (если есть)
+    Содержит: оригинал (до 800 симв.), AI-резюме, стек, нашу оценку,
+    сроки, сложность, релевантность, материалы, цену отклика, возраст.
+    Общая длина не превышает ~2800 символов.
     """
     platform = analyzed.get("platform", "profiru")
     badge = get_platform_badge(platform)
     raw_external_id = analyzed.get("external_id", "?") or "?"
     # external_id может содержать '#' — убираем лишний перед форматированием
     external_id = raw_external_id.lstrip("#")
-    title = analyzed.get("title", "") or ""
-    if len(title) > 120:
-        title = title[:120] + "..."
 
-    # Бюджет
+    # Заголовок (полностью — обрезается только если > 200 симв.)
+    title = analyzed.get("title", "") or ""
+    if len(title) > 200:
+        title = title[:197] + "..."
+
+    # Бюджет клиента
     budget = analyzed.get("budget", "") or ""
+    analysis = analyzed.get("analysis", {}) or {}
     if not budget:
-        analysis = analyzed.get("analysis", {}) or {}
         budget_stated = analysis.get("client_budget_stated", False)
         budget = analysis.get("client_budget_text", "") if budget_stated else ""
-    budget_line = f"\nБюджет: {budget}" if budget else ""
+    budget_header = f"  |  💰 {budget}" if budget else ""
 
-    # Время создания заказа
-    raw_date = analyzed.get("last_update_date")
-    time_ago = _format_order_time(raw_date)
-    time_line = f"\nВремя: {time_ago}" if time_ago else ""
+    # Оригинал задачи (description / raw_text) — до 800 символов
+    description = (
+        analyzed.get("description")
+        or analyzed.get("raw_text")
+        or ""
+    ).strip()
+    if description:
+        if len(description) > 800:
+            description = description[:797] + "..."
+        description_block = f"\n\n<b>📝 Оригинал:</b>\n<i>{description}</i>"
+    else:
+        description_block = ""
+
+    # AI-резюме
+    summary = (analysis.get("summary") or "").strip()
+    summary_block = f"\n\n<b>🤖 AI-резюме:</b> {summary}" if summary else ""
+
+    # Стек
+    stack_list = analysis.get("stack") or []
+    stack_str = ", ".join(stack_list) if stack_list else "—"
+    stack_block = f"\n<b>💻 Стек:</b> {stack_str}"
+
+    # Наша оценка (цена)
+    price_min = analysis.get("price_min")
+    price_max = analysis.get("price_max")
+    price_str = format_price_range(price_min, price_max)
+    price_block = f"\n<b>💵 Наша оценка:</b> {price_str}" if price_str else ""
+
+    # Сроки
+    timeline_days = analysis.get("timeline_days")
+    if timeline_days:
+        timeline_block = f"\n<b>⏳ Сроки:</b> {timeline_days} дн."
+    else:
+        timeline_block = ""
+
+    # Сложность
+    complexity = analysis.get("complexity") or ""
+    complexity_block = f"\n<b>🧩 Сложность:</b> {complexity}" if complexity else ""
 
     # Релевантность
-    analysis = analyzed.get("analysis", {}) or {}
     relevance = analysis.get("relevance_score")
-    relevance_line = f"\nРелевантность: {relevance}/10" if relevance is not None else ""
+    relevance_block = f"\n<b>🎯 Релевантность:</b> {relevance}/10" if relevance is not None else ""
 
     # Материалы
     materials = analyzed.get("materials") or []
-    materials_line = f"\nМатериалы: {len(materials)} шт." if materials else ""
+    materials_block = f"\n<b>📎 Материалы:</b> {len(materials)} шт." if materials else ""
 
-    return (
-        f"<b>{badge} #{external_id}</b>\n"
-        f"{title}"
-        f"{budget_line}"
-        f"{time_line}"
-        f"{relevance_line}"
-        f"{materials_line}"
+    # Цена отклика (Profi.ru)
+    response_price = analyzed.get("response_price")
+    response_price_block = f"\n<b>💬 Цена отклика:</b> {response_price} ₽" if response_price else ""
+
+    # Возраст заявки
+    raw_date = analyzed.get("last_update_date") or analyzed.get("created_at")
+    time_ago = _format_order_time(raw_date)
+    time_block = f"  |  <b>⏰ Свежесть:</b> {time_ago}" if time_ago else ""
+
+    # Собираем карточку
+    card = (
+        f"{badge} #{external_id}{budget_header}\n"
+        f"<b>{title}</b>"
+        f"{description_block}"
+        f"{summary_block}"
+        f"\n"
+        f"{stack_block}"
+        f"{price_block}"
+        f"{timeline_block}"
+        f"{complexity_block}"
+        f"{relevance_block}"
+        f"{materials_block}"
+        f"{response_price_block}{time_block}"
     )
+
+    # Жёсткий лимит — обрезаем если превысили 2900 симв. (с запасом до TG 4096)
+    if len(card) > 2900:
+        card = card[:2897] + "..."
+
+    return card
 
 
 async def _publish_to_group(
@@ -269,13 +321,27 @@ async def _publish_to_group(
         logger.warning("Не удалось опубликовать заявку #%s в группу: %s", order_id, exc)
         return None
 
-    # Сохраняем group_message_id в Order
+    # Atomic UPDATE: пишем group_message_id только если поле ещё NULL.
+    # Защита от race с pmg:hide — если hide успел обнулить раньше нас,
+    # rowcount=0 → удаляем только что отправленное сообщение.
     async with session_factory() as session:
-        result = await session.execute(select(Order).where(Order.id == order_id))
-        order = result.scalar_one_or_none()
-        if order:
-            order.group_message_id = msg.message_id
-            await session.commit()
+        result = await session.execute(
+            update(Order)
+            .where(Order.id == order_id, Order.group_message_id.is_(None))
+            .values(group_message_id=msg.message_id)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        if result.rowcount == 0:
+            logger.info(
+                "Race: order_id=%s group_message_id уже занят, удаляю новое сообщение %s",
+                order_id, msg.message_id,
+            )
+            try:
+                await bot.delete_message(group_chat_id, msg.message_id)
+            except Exception:
+                pass
+            return None
 
     return msg.message_id
 

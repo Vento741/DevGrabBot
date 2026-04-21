@@ -1,7 +1,13 @@
 # Core — Ядро системы
 
-> **Последнее обновление:** 2026-04-21 (v2.5 group_and_filters — Order.group_message_id, Settings.group_chat_enabled, PlatformConfig schema, settings_service: platform config + kwork categories tree)
+> **Последнее обновление:** 2026-04-21 (v2.5.1 unique_constraints — UNIQUE на Order.group_message_id, partial UNIQUE INDEX на активные OrderAssignment)
 > **ВАЖНО:** При любых изменениях в модуле `src/core/` — обновить этот документ!
+
+## v2.5.1 Unique Constraints изменения (2026-04-21)
+
+- `Order.group_message_id` — добавлен `unique=True`. Страхует от сохранения одного message_id дважды (orphan-сообщения в группе). NULL-значения не нарушают UNIQUE в PostgreSQL.
+- `OrderAssignment.__table_args__` — добавлен partial UNIQUE INDEX `uq_order_assignments_active` на `order_id` WHERE `status IN ('approved', 'in_progress')`. Гарантирует не более одного активного assignment на заявку.
+- Миграция: `b2c3d4e5f6a1_v2_5_1_unique_constraints.py` (down_revision: `a1b2c3d4e5f6`). Перед применением проверяет нарушения через SELECT + HAVING COUNT(*) > 1; поднимает RuntimeError если данные конфликтуют.
 
 ## v2.5 Group and Filters изменения (2026-04-21)
 
@@ -118,7 +124,7 @@ class Settings(BaseSettings):
 | `deadline` | str(200) NULL | Дедлайн |
 | `raw_text` | TEXT | Полный текст заявки |
 | `materials` | JSON NULL | Прикреплённые файлы/изображения: `[{"type": "image"|"file", "url": "https://cdn.profi.ru/...", "name": "...", "preview": "..."}]` |
-| `group_message_id` | bigint NULL | ID сообщения в групповом чате (для редактирования / удаления) |
+| `group_message_id` | bigint NULL UNIQUE | ID сообщения в групповом чате (для редактирования / удаления); UNIQUE защищает от orphan-дублей |
 | `status` | OrderStatus | Статус (default: new) |
 | `created_at` | datetime | Время добавления |
 

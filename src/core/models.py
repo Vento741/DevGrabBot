@@ -3,8 +3,8 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text,
-    UniqueConstraint, func,
+    BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text,
+    UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -61,7 +61,7 @@ class Order(Base):
     budget: Mapped[str | None] = mapped_column(String(200), nullable=True)
     response_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     materials: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    group_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    group_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, unique=True)
     location: Mapped[str | None] = mapped_column(String(200), nullable=True)
     deadline: Mapped[str | None] = mapped_column(String(200), nullable=True)
     raw_text: Mapped[str] = mapped_column(Text)
@@ -103,6 +103,14 @@ class AiAnalysis(Base):
 
 class OrderAssignment(Base):
     __tablename__ = "order_assignments"
+    __table_args__ = (
+        Index(
+            "uq_order_assignments_active",
+            "order_id",
+            unique=True,
+            postgresql_where=text("status IN ('approved', 'in_progress')"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
