@@ -159,6 +159,8 @@ async def run_ai_worker(settings: Settings):
                         "platform": platform_val,
                         "url": order_data.get("url"),
                         "title": order.title,
+                        "description": order_data.get("description", ""),
+                        "raw_text": order_data.get("raw_text", ""),
                         "budget": order_data.get("budget", ""),
                         "location": order_data.get("location", ""),
                         "work_format": order_data.get("work_format", ""),

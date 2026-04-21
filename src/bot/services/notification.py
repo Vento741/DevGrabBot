@@ -186,7 +186,7 @@ def format_group_card(analyzed: dict) -> str:
     Общая длина не превышает ~2800 символов.
     """
     platform = analyzed.get("platform", "profiru")
-    badge = get_platform_badge(platform)
+    platform_label = get_platform_label(platform)
     raw_external_id = analyzed.get("external_id", "?") or "?"
     # external_id может содержать '#' — убираем лишний перед форматированием
     external_id = raw_external_id.lstrip("#")
@@ -213,9 +213,25 @@ def format_group_card(analyzed: dict) -> str:
     if description:
         if len(description) > 800:
             description = description[:797] + "..."
-        description_block = f"\n\n<b>📝 Оригинал:</b>\n<i>{description}</i>"
+        description_block = f"\n\n<b>📝 Оригинал ТЗ:</b>\n<i>{description}</i>"
     else:
         description_block = ""
+
+    # Формат работы + локация + когда (из getOrder Profi.ru)
+    work_format = (analyzed.get("work_format") or "").strip()
+    location = (analyzed.get("location") or "").strip()
+    schedule = (analyzed.get("schedule") or "").strip()
+    details_lines = []
+    if work_format:
+        if location and location != work_format:
+            details_lines.append(f"<b>🏠 Формат:</b> {work_format} ({location})")
+        else:
+            details_lines.append(f"<b>🏠 Формат:</b> {work_format}")
+    elif location:
+        details_lines.append(f"<b>📍 Локация:</b> {location}")
+    if schedule:
+        details_lines.append(f"<b>📅 Когда:</b> {schedule}")
+    details_block = ("\n" + "\n".join(details_lines)) if details_lines else ""
 
     # AI-резюме
     summary = (analysis.get("summary") or "").strip()
@@ -262,9 +278,10 @@ def format_group_card(analyzed: dict) -> str:
 
     # Собираем карточку
     card = (
-        f"{badge} #{external_id}{budget_header}\n"
+        f"{platform_label}  |  #{external_id}{budget_header}\n"
         f"<b>{title}</b>"
         f"{description_block}"
+        f"{details_block}"
         f"{summary_block}"
         f"\n"
         f"{stack_block}"
