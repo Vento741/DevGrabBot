@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from src.core.config import Settings
 from src.core.database import create_engine, create_session_factory
 from src.core.redis import RedisClient
-from src.bot.handlers import start, orders, review, manager, dev_panel, manager_panel
+from src.bot.handlers import start, orders, review, manager, dev_panel, manager_panel, group_pm, platform_settings
 from src.bot.middlewares.auth import AuthMiddleware
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,13 @@ def _create_dispatcher(settings: Settings, session_factory) -> Dispatcher:
 
     # Подключаем роутеры
     dp.include_router(start.router)
+    dp.include_router(group_pm.router)
     dp.include_router(orders.router)
     dp.include_router(review.router)
     dp.include_router(manager.router)
     dp.include_router(dev_panel.router)
     dp.include_router(manager_panel.router)
+    dp.include_router(platform_settings.router)
 
     return dp
 

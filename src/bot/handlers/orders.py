@@ -20,8 +20,10 @@ from src.core.models import (
     TeamRole,
 )
 from src.ai.context import OrderContext
-from src.bot.keyboards.orders import order_actions_kb
+from src.bot.keyboards.orders import order_actions_kb, pm_group_taken_kb
 from src.bot.keyboards.review import review_actions_kb
+from src.bot.services.group_sync import sync_group_message
+from src.bot.utils.platforms import get_order_url
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +201,25 @@ async def handle_take_order(
 
         await session.commit()
 
+        # Сохраняем данные для синхронизации группы после выхода из сессии
+        group_message_id = order.group_message_id
+        order_external_id = order.external_id
+        order_platform = getattr(order, "platform", None)
+        dev_display = f"@{member.tg_username}" if member.tg_username else member.name
+
         logger.info(
             "Заявка #%s взята разработчиком %s (tg_id=%s)",
             order.external_id, member.name, user.id,
+        )
+
+    # Синхронизируем статус в групповом чате (заявка взята dev'ом)
+    if settings.group_chat_enabled and group_message_id:
+        platform_url = get_order_url(str(order_platform or "profiru"), order_external_id)
+        await sync_group_message(
+            callback.bot,  # type: ignore[arg-type]
+            settings.group_chat_id,
+            group_message_id,
+            new_keyboard=pm_group_taken_kb(order_id, dev_display, platform_url),
         )
 
     # Обновляем сообщение в личке dev'а: убираем кнопки, добавляем "Взята"

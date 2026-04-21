@@ -261,10 +261,13 @@ class KworkParser(BaseParser):
             "response_price": None,
             "materials": None,
             "raw_text": "\n".join(raw_parts),
-            # Kwork-специфичные поля (для аналитики)
+            # Kwork-специфичные поля (для аналитики и platform filter)
             "kwork_offers": offers,
             "kwork_time_left_hours": time_left,
             "kwork_hired_pct": hired_pct,
             "kwork_category_id": getattr(project, "category_id", None),
             "kwork_parent_category_id": getattr(project, "parent_category_id", None),
+            "kwork_user_need_portfolio": bool(
+                getattr(project, "user_need_portfolio", False)
+            ),
         }

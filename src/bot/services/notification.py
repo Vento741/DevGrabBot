@@ -17,6 +17,7 @@ from src.bot.handlers.orders import format_price_range, relevance_bar
 from src.bot.services.matching import format_matches_block, match_developers
 from src.bot.utils.platforms import (
     get_order_url,
+    get_platform_badge,
     get_platform_label,
     is_platform_enabled_for_user,
 )
@@ -177,6 +178,108 @@ def format_order_notification(data: dict, matches: list | None = None) -> str:
     )
 
 
+def format_group_card(analyzed: dict) -> str:
+    """Короткая карточка заявки для публикации в групповом чате (до 800 символов).
+
+    Формат:
+    <b>{badge} #{external_id}</b>
+    {title_truncated}
+
+    Бюджет: {budget}
+    Время: {time_label}
+    Релевантность: {score}/10
+    Материалы: N шт.  (если есть)
+    """
+    platform = analyzed.get("platform", "profiru")
+    badge = get_platform_badge(platform)
+    raw_external_id = analyzed.get("external_id", "?") or "?"
+    # external_id может содержать '#' — убираем лишний перед форматированием
+    external_id = raw_external_id.lstrip("#")
+    title = analyzed.get("title", "") or ""
+    if len(title) > 120:
+        title = title[:120] + "..."
+
+    # Бюджет
+    budget = analyzed.get("budget", "") or ""
+    if not budget:
+        analysis = analyzed.get("analysis", {}) or {}
+        budget_stated = analysis.get("client_budget_stated", False)
+        budget = analysis.get("client_budget_text", "") if budget_stated else ""
+    budget_line = f"\nБюджет: {budget}" if budget else ""
+
+    # Время создания заказа
+    raw_date = analyzed.get("last_update_date")
+    time_ago = _format_order_time(raw_date)
+    time_line = f"\nВремя: {time_ago}" if time_ago else ""
+
+    # Релевантность
+    analysis = analyzed.get("analysis", {}) or {}
+    relevance = analysis.get("relevance_score")
+    relevance_line = f"\nРелевантность: {relevance}/10" if relevance is not None else ""
+
+    # Материалы
+    materials = analyzed.get("materials") or []
+    materials_line = f"\nМатериалы: {len(materials)} шт." if materials else ""
+
+    return (
+        f"<b>{badge} #{external_id}</b>\n"
+        f"{title}"
+        f"{budget_line}"
+        f"{time_line}"
+        f"{relevance_line}"
+        f"{materials_line}"
+    )
+
+
+async def _publish_to_group(
+    bot: Bot,
+    session_factory,
+    settings: Settings,
+    order_id: int,
+    analyzed: dict,
+) -> int | None:
+    """Публикует короткую карточку заявки в групповой чат.
+
+    Возвращает message_id опубликованного сообщения или None при ошибке/выключенной группе.
+    """
+    if not getattr(settings, "group_chat_enabled", True):
+        return None
+    group_chat_id = getattr(settings, "group_chat_id", None)
+    if not group_chat_id:
+        return None
+
+    from src.bot.keyboards.orders import pm_group_actions_kb
+
+    text = format_group_card(analyzed)
+    platform = analyzed.get("platform", "profiru")
+    external_id = analyzed.get("external_id", "?")
+    platform_url = get_order_url(platform, external_id)
+    has_materials = bool(analyzed.get("materials"))
+    markup = pm_group_actions_kb(order_id, platform_url=platform_url, has_materials=has_materials)
+
+    try:
+        msg = await bot.send_message(
+            chat_id=group_chat_id,
+            text=text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        logger.warning("Не удалось опубликовать заявку #%s в группу: %s", order_id, exc)
+        return None
+
+    # Сохраняем group_message_id в Order
+    async with session_factory() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if order:
+            order.group_message_id = msg.message_id
+            await session.commit()
+
+    return msg.message_id
+
+
 def order_actions_keyboard(
     order_id: int,
     external_id: str,
@@ -272,6 +375,16 @@ async def run_notification_worker(settings: Settings):
             external_id = data.get("external_id", "?")
 
             try:
+                # Публикация в групповой чат (до матчинга — всегда, если включено)
+                group_msg_id = await _publish_to_group(
+                    bot, session_factory, settings, order_id, data,
+                )
+                if group_msg_id:
+                    logger.info(
+                        "Заявка #%s опубликована в группу, message_id=%s",
+                        external_id, group_msg_id,
+                    )
+
                 # Матчинг разработчиков по стеку заявки
                 order_stack: list[str] = data.get("analysis", {}).get("stack", [])
                 matches: list = []
@@ -283,16 +396,25 @@ async def run_notification_worker(settings: Settings):
                         logger.exception("Не удалось загрузить разработчиков для матчинга")
 
                 if not matches:
-                    # Нет совпадений — авто-пропуск
-                    async with session_factory() as session:
-                        order_result = await session.execute(
-                            select(Order).where(Order.id == order_id)
+                    if not group_msg_id:
+                        # Группа выключена И матчей нет — ставим skipped (fallback)
+                        async with session_factory() as session:
+                            order_result = await session.execute(
+                                select(Order).where(Order.id == order_id)
+                            )
+                            order = order_result.scalar_one_or_none()
+                            if order:
+                                order.status = OrderStatus.skipped
+                                await session.commit()
+                        logger.info(
+                            "Заявка #%s — нет матчей и группа выключена, авто-пропуск",
+                            external_id,
                         )
-                        order = order_result.scalar_one_or_none()
-                        if order:
-                            order.status = OrderStatus.skipped
-                            await session.commit()
-                    logger.info("Заявка #%s — нет матчей, авто-пропуск", external_id)
+                    else:
+                        logger.info(
+                            "Заявка #%s — нет матчей, опубликована в группу без DM-рассылки",
+                            external_id,
+                        )
                     continue
 
                 has_materials = bool(data.get("materials"))

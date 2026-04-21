@@ -38,6 +38,9 @@ def dev_main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
         rows.insert(3, [
             InlineKeyboardButton(text="Настройки", callback_data="dev:settings"),
         ])
+        rows.append([
+            InlineKeyboardButton(text="Глобальные фильтры", callback_data="dev:global_filters"),
+        ])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

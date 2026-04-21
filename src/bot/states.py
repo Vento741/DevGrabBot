@@ -53,3 +53,15 @@ class ManagerPanelStates(StatesGroup):
 
     # Поиск заявки
     searching_order = State()
+
+
+class PlatformFilterStates(StatesGroup):
+    """Состояния ввода значений фильтров платформ (Phase 4 v2.5)."""
+
+    waiting_budget = State()               # "min max" или "-" для unset
+    waiting_age = State()                  # число часов (max_age_hours)
+    waiting_min_age = State()              # число секунд (min_age_seconds)
+    waiting_max_response_price = State()   # число рублей (profiru)
+    waiting_min_hired_percent = State()    # число 0-100 (kwork)
+    waiting_offers = State()               # "min max" (kwork)
+    waiting_min_time_left_hours = State()  # число часов (kwork)

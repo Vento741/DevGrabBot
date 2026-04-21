@@ -16,7 +16,9 @@ from src.core.models import (
     TeamMember,
     TeamRole,
 )
+from src.bot.keyboards.orders import pm_group_taken_kb, pm_group_sent_kb, pm_group_cancelled_kb
 from src.bot.keyboards.review import pm_response_kb, pm_status_badge_kb
+from src.bot.services.group_sync import sync_group_message
 from src.bot.utils.platforms import get_platform_label
 
 logger = logging.getLogger(__name__)
@@ -174,6 +176,7 @@ async def handle_pm_sent(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     bot: Bot,
+    settings: Settings,
 ) -> None:
     """PM отметил отклик как отправленный клиенту."""
     await callback.answer("Отмечено как отправленный")
@@ -196,6 +199,9 @@ async def handle_pm_sent(
         external_id = assignment.order.external_id
         platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
+        group_message_id = assignment.order.group_message_id
+        order_url = assignment.order.url
+        order_id = assignment.order_id
         await session.commit()
 
     # Уведомляем разработчика
@@ -215,6 +221,15 @@ async def handle_pm_sent(
     except Exception:
         pass
 
+    # Синхронизируем статус в групповом чате
+    if settings.group_chat_enabled and group_message_id:
+        await sync_group_message(
+            bot,
+            settings.group_chat_id,
+            group_message_id,
+            new_keyboard=pm_group_sent_kb(order_id, order_url),
+        )
+
     logger.info("PM отметил отклик по заявке %s как отправленный", external_id)
 
 
@@ -223,6 +238,7 @@ async def handle_pm_in_progress(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     bot: Bot,
+    settings: Settings,
 ) -> None:
     """PM отметил заявку как 'в работе'."""
     await callback.answer("В работе")
@@ -245,6 +261,12 @@ async def handle_pm_in_progress(
         external_id = assignment.order.external_id
         platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
+        group_message_id = assignment.order.group_message_id
+        order_url = assignment.order.url
+        order_id = assignment.order_id
+        _tg_username = assignment.developer.tg_username
+        _dev_name = assignment.developer.name
+        dev_display = f"@{_tg_username}" if _tg_username else _dev_name
         await session.commit()
 
     await _notify_developer(
@@ -263,6 +285,15 @@ async def handle_pm_in_progress(
     except Exception:
         pass
 
+    # Синхронизируем статус в групповом чате
+    if settings.group_chat_enabled and group_message_id:
+        await sync_group_message(
+            bot,
+            settings.group_chat_id,
+            group_message_id,
+            new_keyboard=pm_group_taken_kb(order_id, dev_display, order_url),
+        )
+
     logger.info("PM перевёл заявку %s в работу", external_id)
 
 
@@ -271,6 +302,7 @@ async def handle_pm_cancel(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     bot: Bot,
+    settings: Settings,
 ) -> None:
     """PM отменил/архивировал заявку."""
     await callback.answer("Заявка отменена")
@@ -289,6 +321,9 @@ async def handle_pm_cancel(
         external_id = assignment.order.external_id
         platform = assignment.order.platform
         dev_tg_id = assignment.developer.tg_id
+        group_message_id = assignment.order.group_message_id
+        order_url = assignment.order.url
+        order_id = assignment.order_id
         await session.commit()
 
     await _notify_developer(
@@ -306,5 +341,14 @@ async def handle_pm_cancel(
         )
     except Exception:
         pass
+
+    # Синхронизируем статус в групповом чате
+    if settings.group_chat_enabled and group_message_id:
+        await sync_group_message(
+            bot,
+            settings.group_chat_id,
+            group_message_id,
+            new_keyboard=pm_group_cancelled_kb(order_id, order_url),
+        )
 
     logger.info("PM отменил заявку %s", external_id)

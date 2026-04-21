@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Telegram
     bot_token: str
-    group_chat_id: int = 0  # deprecated: kept for backward compat
+    group_chat_id: int = -1003648962522
+    group_chat_enabled: bool = True
 
     # Database
     database_url: str

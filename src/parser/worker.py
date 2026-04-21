@@ -255,12 +255,21 @@ async def _sleep_with_keepalive(
 
 
 async def _refresh_filters(parser: ProfiruParser, session_factory, settings: Settings) -> None:
-    """Обновить стоп-слова и настройки фильтров из БД."""
+    """Обновить стоп-слова и platform config из БД."""
     try:
         async with session_factory() as session:
             await parser.filters.refresh_stop_words(session, settings)
     except Exception:
         logger.debug("Не удалось обновить стоп-слова из БД, используем текущие")
+
+    try:
+        from src.core.settings_service import get_platform_config
+        async with session_factory() as session:
+            config = await get_platform_config(session, "profiru")
+        parser.filters.apply_config("profiru", config)
+        logger.debug("Profi.ru platform config обновлён из БД")
+    except Exception:
+        logger.debug("Не удалось обновить platform config Profi.ru из БД, используем текущий")
 
 
 async def _parse_iteration(

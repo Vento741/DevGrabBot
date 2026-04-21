@@ -61,6 +61,7 @@ class Order(Base):
     budget: Mapped[str | None] = mapped_column(String(200), nullable=True)
     response_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     materials: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    group_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     location: Mapped[str | None] = mapped_column(String(200), nullable=True)
     deadline: Mapped[str | None] = mapped_column(String(200), nullable=True)
     raw_text: Mapped[str] = mapped_column(Text)

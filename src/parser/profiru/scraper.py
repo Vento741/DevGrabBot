@@ -213,11 +213,34 @@ class ProfiruParser(BaseParser):
                 skipped += 1
                 continue
 
+            # Pre-enrich platform check (без response_price — проверяем budget/remote/enabled)
+            accepted_flag, reason = self.filters.platform_check(order)
+            if not accepted_flag:
+                logger.debug(
+                    "Platform filter (pre-enrich) отклонил %s: %s",
+                    ext_id, reason,
+                )
+                skipped += 1
+                continue
+
             details = await self._fetch_order_details(ext_id, token)
             if details.get("response_price") is not None:
                 order["response_price"] = details["response_price"]
             if details.get("materials"):
                 order["materials"] = details["materials"]
+
+            # Post-enrich platform check (response_price теперь известен)
+            accepted_flag, reason = self.filters.platform_check(order)
+            if not accepted_flag:
+                logger.debug(
+                    "Platform filter (post-enrich) отклонил %s: %s",
+                    order.get("external_id"), reason,
+                )
+                skipped += 1
+                # Пауза всё равно нужна (запрос уже был сделан)
+                await self._random_delay()
+                continue
+
             accepted.append(order)
             # Пауза после HTTP-запроса (anti-ban)
             await self._random_delay()

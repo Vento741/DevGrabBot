@@ -1,6 +1,6 @@
 # Parser — Парсер фриланс-платформ (multi-platform)
 
-> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — добавлен Kwork парсер, унифицирован контракт Redis dict, `run_parser_worker` запускает активные платформы через asyncio.gather)
+> **Последнее обновление:** 2026-04-21 (v2.5 Phase 5 — платформенные фильтры: `platform_check()`, `kwork_check()`, `_parse_budget()`, `apply_config()` в `ProfiruFilters`; post-enrich platform_check в `process_raw_orders`; `_refresh_platform_config` в обоих воркерах)
 > **ВАЖНО:** При любых изменениях в модуле `src/parser/` — обновить этот документ!
 
 ## Назначение
@@ -288,12 +288,50 @@ Materials передаются через pipeline: parser → AI worker → Ord
 
 ## ProfiruFilters (filters.py)
 
-### is_acceptable(order) → bool
+Используется и для Profi.ru и для Kwork — общие поля (стоп-слова, возраст) универсальны.
 
-Последовательная проверка:
+### Функция `_parse_budget(s: str | None) -> int | None`
+
+Парсит строку бюджета в целое число. Примеры: `"5 000 ₽"` → 5000, `"от 5000 ₽"` → 5000, `"договорная"` → None.
+
+### `apply_config(platform: str, config: PlatformConfig) -> None`
+
+Применяет глобальный PlatformConfig для заданной платформы ("profiru" или "kwork"). Вызывается в начале каждой итерации воркера. Перезаписывает `max_age_hours` если задан в конфиге.
+
+### `is_acceptable(order) → bool`
+
+Базовая (общая) проверка:
 1. **external_id** — должен быть непустой
-2. **Возраст** — от 70 сек до `time_threshold_hours` (24ч)
-3. **Стоп-слова** — проверка в title, description, subject, type
+2. **Возраст** — от 70 сек до `max_age_hours` × 3600
+3. **Стоп-слова** — проверка в title, description, subject, type, raw_text
+
+### `platform_check(order) → tuple[bool, str]`
+
+Profi.ru-специфичные проверки по `_profiru_config`:
+1. `enabled` — платформа включена
+2. `min_budget` / `max_budget` / `include_no_budget` — бюджет через `_parse_budget()`
+3. `profiru.max_response_price` — цена отклика (только после enrich)
+4. `profiru.only_remote` — формат работы "Дистанционно"
+5. `profiru.exclude_free` — исключить заказы с нулевым / "бесплатно" бюджетом
+
+Вызывается дважды в `process_raw_orders`: **pre-enrich** (до getOrder, без response_price) и **post-enrich** (после getOrder, полный набор).
+
+### `kwork_check(order) → tuple[bool, str]`
+
+Kwork-специфичные проверки по `_kwork_config`:
+1. `enabled`
+2. `min_budget` / `max_budget` / `include_no_budget`
+3. `kwork.category_ids` — `order["kwork_category_id"]` в списке
+4. `kwork.min_hired_percent` — `order["kwork_hired_pct"]`
+5. `kwork.min_offers` / `max_offers` — `order["kwork_offers"]`
+6. `kwork.exclude_portfolio_required` — `order["kwork_user_need_portfolio"]`
+7. `kwork.min_time_left_hours` — `order["kwork_time_left_hours"]`
+
+Вызывается в `kwork/worker.py` после `filter_order()`.
+
+### Kwork `_normalize` — новое поле
+
+`kwork_user_need_portfolio: bool` — `bool(project.user_need_portfolio)` — нужно ли портфолио.
 
 ---
 

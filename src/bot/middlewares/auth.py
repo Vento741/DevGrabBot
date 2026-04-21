@@ -41,7 +41,7 @@ class AuthMiddleware(BaseMiddleware):
             if event.message and event.message.chat.type != "private":
                 # Пропускаем кнопки заявок в группе (take/skip/taken_info/original)
                 cb_data = event.data or ""
-                _group_allowed = ("take:", "skip:", "taken_info:", "original:", "materials:")
+                _group_allowed = ("take:", "skip:", "taken_info:", "original:", "materials:", "pmg:")
                 if cb_data.startswith(_group_allowed):
                     pass  # разрешаем — это кнопки заявок
                 else:

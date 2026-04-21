@@ -1,7 +1,59 @@
 # Bot — Telegram бот (aiogram 3)
 
-> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — кнопка "Платформы" в /dev и /manager, platform badges в карточках заявок, динамический URL builder, фильтрация нотификаций по платформам; UX-улучшения стоп-слов — массовый ввод, пагинация, экспорт в .txt, очистка)
+> **Последнее обновление:** 2026-04-21 (v2.5 access control — глобальные фильтры только для manager)
 > **ВАЖНО:** При любых изменениях в модуле `src/bot/` — обновить этот документ!
+
+## v2.5 Access Control — Глобальные фильтры только для manager (2026-04-21)
+
+- **`_check_access(callback, session_factory) -> bool`** — проверяет `TeamMember.role == TeamRole.manager`; при отказе отправляет `show_alert` и возвращает `False`.
+- **`_check_access_message(message, session_factory, state) -> bool`** — аналог для FSM message-handlers; при отказе чистит state и отвечает текстом.
+- Закрыты все 15 публичных handlers: `handle_open_global_filters`, `handle_toggle_platform`, `handle_open_platform`, `handle_close_platforms`, `handle_back_to_list`, `handle_toggle_field`, `handle_reset_platform`, `handle_edit_field`, `handle_kwork_cats_open`, `handle_kwork_cats_toggle`, `handle_kwork_cats_drill`, `handle_kwork_cats_save`, `handle_kwork_cats_refresh_tree` (callback) + 7 FSM message-handlers (`handle_input_budget`, `handle_input_age`, `handle_input_min_age`, `handle_input_max_response_price`, `handle_input_min_hired_percent`, `handle_input_offers`, `handle_input_min_time_left`).
+- `handle_close_platforms` и `handle_edit_field` получили новый параметр `session_factory` в сигнатуре.
+- Примечание: `TeamMember` использует поле `tg_id` (не `telegram_id`), `is_admin` отсутствует в модели — использован только `role == TeamRole.manager`.
+
+## v2.5 Phase 4 — Глобальные фильтры платформ (2026-04-21)
+
+- **Новый модуль `src/bot/keyboards/platforms.py`**: `platforms_list_kb`, `platform_detail_kb`, `kwork_categories_kb` — двухуровневый UI.
+- **Новый handler `src/bot/handlers/platform_settings.py`** (Router `platform_settings`):
+  - Callback-префиксы `mplat:*` (менеджер) и `dplat:*` (admin dev).
+  - Уровень 1: список платформ → `mplat:toggle:{platform}`, `mplat:open:{platform}`, `mplat:back`, `mplat:close`.
+  - Уровень 2: фильтры платформы → `mplat:edit:{platform}:{field}` (FSM), `mplat:toggle_field:{platform}:{field}`, `mplat:reset:{platform}`.
+  - Категории Kwork: `mplat:kwork_cats:open/toggle/drill/save/refresh_tree` + FSM multi-select.
+  - Fallback IT-категорий (`_KWORK_IT_CATEGORIES_FALLBACK`) когда pykwork API не имеет `get_categories()`.
+- **Новые FSM-состояния `PlatformFilterStates`** в `src/bot/states.py`: 7 состояний для ввода числовых/диапазонных значений фильтров.
+- **Интеграция в manager**: кнопка «Глобальные фильтры» (`mgr:global_filters`) добавлена в `manager_main_menu_kb`, per-user «Мои платформы» сохранена.
+- **Интеграция в dev**: кнопка «Глобальные фильтры» (`dev:global_filters`) добавлена в `dev_main_menu_kb` только для `is_admin=True`.
+- **bot.py**: `platform_settings.router` зарегистрирован после `manager_panel.router`.
+
+## v2.5 Phase 6 — Синхронизация статусов DM → группа (2026-04-21)
+
+- **Новый сервис `src/bot/services/group_sync.py`**: функция `sync_group_message(bot, group_chat_id, group_message_id, *, new_keyboard, remove_keyboard)` — безопасно меняет клавиатуру группового сообщения, ловит `TelegramAPIError`.
+- **Новые клавиатуры** в `keyboards/orders.py`:
+  - `pm_group_sent_kb(order_id, platform_url)` — статус "✅ Отправлено клиенту" + ссылка.
+  - `pm_group_cancelled_kb(order_id, platform_url)` — статус "❌ Отменена" + ссылка.
+  - `pm_group_taken_kb` — уже существовала (Phase 3).
+- **Синхронизация в `handlers/orders.py`** (`handle_take_order`): после взятия заявки dev'ом через DM — групповая карточка получает `pm_group_taken_kb` с именем dev'а.
+- **Синхронизация в `handlers/manager.py`**:
+  - `handle_pm_sent` (`pm_sent:`) — обновляет группу на `pm_group_sent_kb`.
+  - `handle_pm_in_progress` (`pm_in_progress:`) — обновляет группу на `pm_group_taken_kb` с именем исполнителя.
+  - `handle_pm_cancel` (`pm_cancel:`) — обновляет группу на `pm_group_cancelled_kb`.
+  - Все три handler'а получили `settings: Settings` в подписи для доступа к `group_chat_id` / `group_chat_enabled`.
+- **Защита**: проверка `settings.group_chat_enabled and order.group_message_id` перед каждой синхронизацией.
+
+## v2.5 Phase 2+3 — Групповой чат — параллельный канал (2026-04-21)
+
+- **Публикация в группу (всегда):** в `notification.py` до DM-матчинга вызывается `_publish_to_group()` — короткая карточка `format_group_card()` с PM-клавиатурой `pm_group_actions_kb`. `Order.group_message_id` сохраняется в БД.
+- **Логика skipped изменена:** `skipped` ставится только если группа выключена И нет матчей. Если группа включена — заявка всегда публикуется, даже без матчей.
+- **PM-клавиатура `pm_group_actions_kb`** (`keyboards/orders.py`): кнопки `[Взять себе][Анализ]`, опциональные `[Материалы][Открыть]`, `[Скрыть]`. Колбэк-префикс `pmg:`.
+- **Клавиатура после взятия `pm_group_taken_kb`**: заменяет pmg-клавиатуру, показывает `В работе: @pm`.
+- **Новый handler `src/bot/handlers/group_pm.py`** (Router `group_pm`):
+  - `pmg:take:{id}` — PM берёт заявку, создаёт `OrderAssignment(status=approved)`, обновляет клавиатуру в группе, DM PM-у.
+  - `pmg:analysis:{id}` — полный AI-анализ в DM PM-у (не засоряет группу).
+  - `pmg:materials:{id}` — материалы заявки в DM PM-у.
+  - `pmg:hide:{id}` — удалить карточку из группы (только PM/admin), сбрасывает `Order.group_message_id`.
+  - `pmg:info:{id}` — alert "кто взял и когда".
+- **auth.py whitelist:** добавлен `"pmg:"` в `_group_allowed`.
+- **bot.py:** `group_pm.router` зарегистрирован перед `orders.router`.
 
 ## v2.4 Multi-platform UI (2026-04-20)
 
@@ -28,10 +80,13 @@ Telegram бот для взаимодействия команды с заявк
 | `src/bot/handlers/manager.py` | Отправка менеджеру |
 | `src/bot/handlers/dev_panel.py` | Панель разработчика (CP-5.1, CP-5.4–CP-5.11) |
 | `src/bot/handlers/manager_panel.py` | Панель менеджера (CP-6.1, CP-6.4–CP-6.12) |
+| `src/bot/handlers/group_pm.py` | PM-действия в групповом чате (pmg:*) — v2.5 |
+| `src/bot/handlers/platform_settings.py` | Глобальные фильтры платформ (mplat:*/dplat:*) — v2.5 Phase 4 |
 | `src/bot/keyboards/orders.py` | Клавиатура для заявок |
 | `src/bot/keyboards/review.py` | Клавиатура для рецензирования |
 | `src/bot/keyboards/dev_panel.py` | Клавиатуры панели разработчика (CP-5.2) |
 | `src/bot/keyboards/manager_panel.py` | Клавиатуры панели менеджера (CP-6.2) |
+| `src/bot/keyboards/platforms.py` | Клавиатуры глобальных фильтров платформ — v2.5 Phase 4 |
 | `src/bot/middlewares/auth.py` | Проверка доступа через team_members + блокировка команд в группах (только ЛС) |
 | `src/bot/workers/notification.py` | Воркер уведомлений (Redis → TG) |
 | `src/bot/services/notification.py` | Логика форматирования + воркер уведомлений |
@@ -362,6 +417,19 @@ asyncio.gather(
 ```
 [✅ Взять] [❌ Пропустить]
 [🔍 Просмотр деталей]  ← только если has_materials=True
+```
+
+### pm_group_actions_kb(order_id, platform_url, has_materials) — v2.5
+```
+[Взять себе] [Анализ]
+[Материалы]  [Открыть]   ← опционально
+[Скрыть]
+```
+
+### pm_group_taken_kb(order_id, taken_by_display, platform_url) — v2.5
+```
+[В работе: @pm]
+[Открыть на платформе]   ← если есть ссылка
 ```
 
 ### review_actions_kb(assignment_id, external_id)

@@ -61,16 +61,19 @@ async def run_kwork_worker(settings: Settings) -> None:
 
 async def _kwork_iteration(parser, redis_client, redis_conn, settings: Settings) -> None:
     """Одна итерация: fetch → filter → dedup → push."""
-    # Обновить стоп-слова из БД
+    # Обновить стоп-слова и platform config из БД (единая сессия)
     try:
         from src.core.database import create_engine, create_session_factory
+        from src.core.settings_service import get_platform_config
         engine = create_engine(settings)
         session_factory = create_session_factory(engine)
         async with session_factory() as session:
             await parser.filters.refresh_stop_words(session, settings)
+            kwork_config = await get_platform_config(session, "kwork")
         await engine.dispose()
+        parser.filters.apply_config("kwork", kwork_config)
     except Exception:
-        logger.debug("Kwork: не удалось обновить стоп-слова", exc_info=True)
+        logger.debug("Kwork: не удалось обновить стоп-слова / platform config", exc_info=True)
 
     orders = await parser.fetch_orders()
     if not orders:
@@ -80,6 +83,13 @@ async def _kwork_iteration(parser, redis_client, redis_conn, settings: Settings)
     for order in orders:
         if not parser.filter_order(order):
             continue
+
+        # Kwork platform-specific фильтры
+        accepted, reason = parser.filters.kwork_check(order)
+        if not accepted:
+            logger.debug("Kwork platform filter отклонил %s: %s", order["external_id"], reason)
+            continue
+
         external_id = order["external_id"]
 
         # Дедуп через Redis set (локальный для Kwork)

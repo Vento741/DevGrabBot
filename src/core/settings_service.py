@@ -1,11 +1,14 @@
 """Сервис настроек — CRUD для таблицы settings с fallback на config."""
 import json
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings
 from src.core.models import Setting
+
+logger = logging.getLogger(__name__)
 
 # Валидные ключи промптов (без префикса "prompt_")
 PROMPT_KEYS = ("analyze", "response", "roadmap")
@@ -224,3 +227,67 @@ async def get_config_setting(
         return db_value
 
     return str(getattr(config, key))
+
+
+# ---------------------------------------------------------------------------
+# Platform config (v2.5)
+# ---------------------------------------------------------------------------
+
+
+def _platform_config_key(platform: str) -> str:
+    return f"platform_config:{platform}"
+
+
+async def get_platform_config(session: AsyncSession, platform: str):
+    """Получить конфиг платформы. При отсутствии / ошибке парсинга — дефолт.
+
+    Returns:
+        PlatformConfig instance.
+    """
+    from src.core.platform_config import PlatformConfig  # local import to avoid circular
+
+    if platform not in {"profiru", "kwork"}:
+        raise ValueError(f"Unknown platform: {platform}")
+    raw = await get_setting(session, _platform_config_key(platform))
+    if not raw:
+        return PlatformConfig.default_for(platform)
+    try:
+        data = json.loads(raw)
+        return PlatformConfig.model_validate(data)
+    except Exception as exc:
+        logger.warning("Broken platform_config:%s in DB, using defaults: %s", platform, exc)
+        return PlatformConfig.default_for(platform)
+
+
+async def set_platform_config(session: AsyncSession, platform: str, config) -> None:
+    """Сохранить конфиг платформы как JSON.
+
+    config: PlatformConfig instance.
+    """
+    from src.core.platform_config import PlatformConfig  # local import to avoid circular
+
+    if platform not in {"profiru", "kwork"}:
+        raise ValueError(f"Unknown platform: {platform}")
+    if not isinstance(config, PlatformConfig):
+        raise TypeError(f"Expected PlatformConfig, got {type(config)}")
+    raw = config.model_dump_json()
+    await set_setting(session, _platform_config_key(platform), raw)
+
+
+async def get_kwork_categories_tree(session: AsyncSession) -> list[dict] | None:
+    """Получить кэшированное дерево категорий Kwork (для multi-select UI)."""
+    raw = await get_setting(session, "kwork_categories_tree")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def set_kwork_categories_tree(session: AsyncSession, tree: list[dict]) -> None:
+    """Сохранить дерево категорий Kwork.
+
+    Структура: [{id, name, parent_id, children: [...]}]
+    """
+    await set_setting(session, "kwork_categories_tree", json.dumps(tree, ensure_ascii=False))

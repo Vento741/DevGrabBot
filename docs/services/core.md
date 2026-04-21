@@ -1,7 +1,16 @@
 # Core — Ядро системы
 
-> **Последнее обновление:** 2026-04-20 (v2.4 multi-platform — SourcePlatform enum, Order.url, составной unique, TeamMember.platforms, KWORK_* настройки; settings_service: `bulk_add_stop_words`)
+> **Последнее обновление:** 2026-04-21 (v2.5 group_and_filters — Order.group_message_id, Settings.group_chat_enabled, PlatformConfig schema, settings_service: platform config + kwork categories tree)
 > **ВАЖНО:** При любых изменениях в модуле `src/core/` — обновить этот документ!
+
+## v2.5 Group and Filters изменения (2026-04-21)
+
+- `Order.group_message_id: BigInteger NULL` — ID сообщения в групповом чате (для редактирования/отзыва).
+- `Settings.group_chat_enabled: bool = True` — флаг включения публикации в группу (читается из `.env`).
+- `Settings.group_chat_id` — убран deprecated-комментарий, default `-1003648962522`.
+- `src/core/platform_config.py` — новый модуль: `ProfiruFilters`, `KworkFilters`, `PlatformConfig` (Pydantic v2).
+- `settings_service.py` — добавлены: `get_platform_config`, `set_platform_config`, `get_kwork_categories_tree`, `set_kwork_categories_tree`.
+- Миграция: `a1b2c3d4e5f6_v2_5_group_and_filters.py` (down_revision: `3f8a2b1c4d7e`).
 
 ## v2.4 Multi-platform изменения (2026-04-20)
 
@@ -24,7 +33,8 @@
 | `src/core/models.py` | SQLAlchemy 2 модели (6 таблиц, 3 enum) |
 | `src/core/database.py` | Async engine + session factory |
 | `src/core/redis.py` | Redis клиент для очередей и дедупликации |
-| `src/core/settings_service.py` | CRUD сервис для таблицы settings (стоп-слова, промпты, config-параметры) |
+| `src/core/settings_service.py` | CRUD сервис для таблицы settings (стоп-слова, промпты, config-параметры, platform config) |
+| `src/core/platform_config.py` | Pydantic-схемы фильтров платформ: `ProfiruFilters`, `KworkFilters`, `PlatformConfig` |
 
 ---
 
@@ -34,7 +44,8 @@
 class Settings(BaseSettings):
     # Telegram
     bot_token: str
-    group_chat_id: int
+    group_chat_id: int = -1003648962522
+    group_chat_enabled: bool = True
 
     # Database
     database_url: str  # postgresql+asyncpg://user:pass@host:port/db
@@ -107,6 +118,7 @@ class Settings(BaseSettings):
 | `deadline` | str(200) NULL | Дедлайн |
 | `raw_text` | TEXT | Полный текст заявки |
 | `materials` | JSON NULL | Прикреплённые файлы/изображения: `[{"type": "image"|"file", "url": "https://cdn.profi.ru/...", "name": "...", "preview": "..."}]` |
+| `group_message_id` | bigint NULL | ID сообщения в групповом чате (для редактирования / удаления) |
 | `status` | OrderStatus | Статус (default: new) |
 | `created_at` | datetime | Время добавления |
 
@@ -313,8 +325,57 @@ create_session_factory(engine) → async_sessionmaker[AsyncSession]
 
 ---
 
+### Platform config (key="platform_config:{platform}")
+
+| Функция | Сигнатура | Описание |
+|---------|-----------|---------|
+| `get_platform_config` | `(session, platform) → PlatformConfig` | DB → дефолт при отсутствии или битом JSON |
+| `set_platform_config` | `(session, platform, config) → None` | Сохранить как JSON-строку |
+| `get_kwork_categories_tree` | `(session) → list[dict] \| None` | Кэш дерева категорий Kwork для UI |
+| `set_kwork_categories_tree` | `(session, tree) → None` | Сохранить дерево категорий Kwork |
+
+**Допустимые значения platform:** `"profiru"`, `"kwork"`.
+**DB-ключи:** `platform_config:profiru`, `platform_config:kwork`, `kwork_categories_tree`.
+
+---
+
+## platform_config.py — PlatformConfig
+
+```python
+class ProfiruFilters(BaseModel):
+    max_response_price: int | None  # ge=0
+    only_remote: bool = False
+    exclude_free: bool = False
+
+class KworkFilters(BaseModel):
+    category_ids: list[int] = [11]
+    min_hired_percent: int | None   # ge=0, le=100
+    min_offers: int | None          # ge=0
+    max_offers: int | None          # ge=0
+    exclude_portfolio_required: bool = False
+    min_time_left_hours: int | None # ge=0
+
+class PlatformConfig(BaseModel):
+    enabled: bool = True
+    max_age_hours: int | None       # ge=1, override time_threshold_hours
+    min_age_seconds: int | None     # ge=0, override MIN_ORDER_AGE_SECONDS
+    min_budget: int | None          # ge=0
+    max_budget: int | None          # ge=0, validator: max_budget >= min_budget
+    include_no_budget: bool = True
+    profiru: ProfiruFilters
+    kwork: KworkFilters
+
+    @classmethod
+    def default_for(cls, platform: str) -> PlatformConfig: ...
+```
+
+Хранится в `settings.value` как JSON (ключ `platform_config:{platform}`). Загружается через `get_platform_config`, сохраняется через `set_platform_config`.
+
+---
+
 ## Gotchas
 
 - Пароль БД НЕ должен содержать `!` (проблемы с URL-кодированием)
 - `python3` а не `python` (Ubuntu 24.04)
 - Alembic env.py требует `sys.path.insert` для импорта модулей
+- `get_platform_config` / `set_platform_config` используют local import `platform_config` во избежание circular import
