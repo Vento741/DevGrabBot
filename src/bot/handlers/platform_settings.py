@@ -1,22 +1,24 @@
 """Handlers платформенных настроек (Phase 4 v2.5).
 
-Callback префиксы:
-- mplat:* — глобальные фильтры из панели менеджера
-- dplat:* — глобальные фильтры из панели разработчика (только admin)
+Единый callback-префикс: plat:*
 
 Формат callback_data:
-- {prefix}:toggle:{platform}            — включить/выключить платформу
-- {prefix}:open:{platform}              — экран настроек уровня 2
-- {prefix}:close                        — закрыть (удалить сообщение)
-- {prefix}:back                         — назад к списку платформ
-- {prefix}:edit:{platform}:{field}      — запрос ввода значения (FSM)
-- {prefix}:toggle_field:{platform}:{f}  — переключить bool-поле
-- {prefix}:reset:{platform}             — сбросить фильтры к дефолту
-- {prefix}:kwork_cats:open              — multi-select категорий Kwork
-- {prefix}:kwork_cats:toggle:{id}       — toggle категории в multi-select
-- {prefix}:kwork_cats:drill:{id}        — провалиться в подкатегорию (0 = top)
-- {prefix}:kwork_cats:save              — сохранить выбранные категории
-- {prefix}:kwork_cats:refresh_tree      — обновить/загрузить дерево категорий
+- plat:toggle:{platform}            — включить/выключить платформу
+- plat:open:{platform}              — экран настроек уровня 2
+- plat:close                        — закрыть (удалить сообщение)
+- plat:back                         — назад к списку платформ
+- plat:edit:{platform}:{field}      — запрос ввода значения (FSM)
+- plat:toggle_field:{platform}:{f}  — переключить bool-поле
+- plat:reset:{platform}             — сбросить фильтры к дефолту
+- plat:kwork_cats:open              — multi-select категорий Kwork
+- plat:kwork_cats:toggle:{id}       — toggle категории в multi-select
+- plat:kwork_cats:drill:{id}        — провалиться в подкатегорию (0 = top)
+- plat:kwork_cats:save              — сохранить выбранные категории
+- plat:kwork_cats:refresh_tree      — обновить/загрузить дерево категорий
+
+Entry points (из панелей):
+- mgr:global_filters  — вход из панели менеджера
+- dev:global_filters  — вход из панели разработчика (только admin)
 """
 from __future__ import annotations
 
@@ -128,13 +130,13 @@ _KWORK_IT_CATEGORIES_FALLBACK: list[dict] = [
 # ---------------------------------------------------------------------------
 
 
-def _owner_from_data(data: str) -> str:
-    """mplat:... → 'mgr', dplat:... → 'dev'."""
-    return "mgr" if data.startswith("mplat:") else "dev"
+def _back_cb_from_entry(data: str) -> str:
+    """Определить callback кнопки «← Назад» по entry-точке.
 
-
-def _prefix_from_data(data: str) -> str:
-    return "mplat" if data.startswith("mplat:") else "dplat"
+    mgr:global_filters → mgr:back
+    dev:global_filters → dev:back
+    """
+    return "mgr:back" if data.startswith("mgr:") else "dev:back"
 
 
 def _platforms_text(profiru_cfg: PlatformConfig, kwork_cfg: PlatformConfig) -> str:
@@ -216,7 +218,7 @@ def _offers_text(c: PlatformConfig) -> str:
 async def _show_platforms_list(
     event: CallbackQuery | Message,
     session_factory: Any,
-    owner: str,
+    back_cb: str = "mgr:back",
     edit: bool = True,
 ) -> None:
     """Показать список платформ (уровень 1)."""
@@ -225,7 +227,7 @@ async def _show_platforms_list(
         kwork_cfg = await get_platform_config(session, "kwork")
 
     text = _platforms_text(profiru_cfg, kwork_cfg)
-    kb = platforms_list_kb(profiru_cfg.enabled, kwork_cfg.enabled, owner=owner)
+    kb = platforms_list_kb(profiru_cfg.enabled, kwork_cfg.enabled, back_cb=back_cb)
 
     if isinstance(event, CallbackQuery):
         if edit and event.message:
@@ -237,7 +239,7 @@ async def _show_platforms_list(
 
 
 # ---------------------------------------------------------------------------
-# Общий обработчик входа в раздел глобальных фильтров
+# Entry handler: mgr:global_filters / dev:global_filters
 # ---------------------------------------------------------------------------
 
 
@@ -245,26 +247,28 @@ async def _show_platforms_list(
 async def handle_open_global_filters(
     callback: CallbackQuery,
     session_factory: Any,
+    state: FSMContext,
 ) -> None:
     """Открыть экран глобальных фильтров платформ из главного меню панели."""
     if not await _check_access(callback, session_factory):
         return
     await callback.answer()
-    owner = "mgr" if (callback.data or "").startswith("mgr:") else "dev"
-    await _show_platforms_list(callback, session_factory, owner=owner)
+    # Сохраняем back_cb в FSM, чтобы кнопка «← Назад к списку» знала куда вернуться
+    back_cb = _back_cb_from_entry(callback.data or "")
+    await state.update_data(plat_back_cb=back_cb)
+    await _show_platforms_list(callback, session_factory, back_cb=back_cb)
 
 
 # ---------------------------------------------------------------------------
-# mplat:* и dplat:* handlers — toggle платформы
+# plat:* handlers — toggle платформы
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(lambda d: d.startswith("mplat:toggle:") or d.startswith("dplat:toggle:"))
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:toggle:")))
 async def handle_toggle_platform(
     callback: CallbackQuery,
     session_factory: Any,
+    state: FSMContext,
 ) -> None:
     """Включить/выключить платформу (глобально)."""
     if not await _check_access(callback, session_factory):
@@ -275,7 +279,6 @@ async def handle_toggle_platform(
     if len(parts) < 3:
         return
     platform = parts[2]
-    owner = _owner_from_data(data)
 
     if platform not in {"profiru", "kwork"}:
         await callback.answer("Неизвестная платформа.", show_alert=True)
@@ -288,12 +291,14 @@ async def handle_toggle_platform(
 
     action = "включена" if new_config.enabled else "выключена"
     logger.info(
-        "Платформа %s %s (owner=%s, tg_id=%s)",
-        platform, action, owner,
+        "Платформа %s %s (tg_id=%s)",
+        platform, action,
         callback.from_user.id if callback.from_user else "?",
     )
     await callback.answer(f"Платформа {platform} {action}.", show_alert=False)
-    await _show_platforms_list(callback, session_factory, owner=owner)
+    fsm_data = await state.get_data()
+    back_cb = fsm_data.get("plat_back_cb", "mgr:back")
+    await _show_platforms_list(callback, session_factory, back_cb=back_cb)
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +306,7 @@ async def handle_toggle_platform(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(lambda d: d.startswith("mplat:open:") or d.startswith("dplat:open:"))
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:open:")))
 async def handle_open_platform(
     callback: CallbackQuery,
     session_factory: Any,
@@ -319,7 +322,6 @@ async def handle_open_platform(
     if len(parts) < 3:
         return
     platform = parts[2]
-    owner = _owner_from_data(data)
 
     if platform not in {"profiru", "kwork"}:
         return
@@ -328,7 +330,7 @@ async def handle_open_platform(
         config = await get_platform_config(session, platform)
 
     text = _platform_text(platform, config)
-    kb = platform_detail_kb(platform, config, owner=owner)
+    kb = platform_detail_kb(platform, config)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -338,9 +340,7 @@ async def handle_open_platform(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.in_({"mplat:close", "dplat:close"})
-)
+@router.callback_query(F.data == "plat:close")
 async def handle_close_platforms(callback: CallbackQuery, session_factory: Any) -> None:
     """Удалить сообщение с настройками платформ."""
     if not await _check_access(callback, session_factory):
@@ -358,9 +358,7 @@ async def handle_close_platforms(callback: CallbackQuery, session_factory: Any) 
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.in_({"mplat:back", "dplat:back"})
-)
+@router.callback_query(F.data == "plat:back")
 async def handle_back_to_list(
     callback: CallbackQuery,
     session_factory: Any,
@@ -371,8 +369,9 @@ async def handle_back_to_list(
         return
     await callback.answer()
     await state.clear()
-    owner = _owner_from_data(callback.data or "")
-    await _show_platforms_list(callback, session_factory, owner=owner)
+    fsm_data = await state.get_data()
+    back_cb = fsm_data.get("plat_back_cb", "mgr:back")
+    await _show_platforms_list(callback, session_factory, back_cb=back_cb)
 
 
 # ---------------------------------------------------------------------------
@@ -380,11 +379,7 @@ async def handle_back_to_list(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(
-        lambda d: d.startswith("mplat:toggle_field:") or d.startswith("dplat:toggle_field:")
-    )
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:toggle_field:")))
 async def handle_toggle_field(
     callback: CallbackQuery,
     session_factory: Any,
@@ -394,11 +389,10 @@ async def handle_toggle_field(
         return
     await callback.answer()
     data = callback.data or ""
-    # формат: {prefix}:toggle_field:{platform}:{field}
+    # формат: plat:toggle_field:{platform}:{field}
     parts = data.split(":")
     if len(parts) < 4:
         return
-    owner = _owner_from_data(data)
     platform = parts[2]
     field = parts[3]
 
@@ -427,10 +421,10 @@ async def handle_toggle_field(
         new_config = PlatformConfig.model_validate(config_dict)
         await set_platform_config(session, platform, new_config)
 
-    logger.info("Поле %s.%s переключено (owner=%s)", platform, field, owner)
+    logger.info("Поле %s.%s переключено", platform, field)
     # Обновляем экран
     text = _platform_text(platform, new_config)
-    kb = platform_detail_kb(platform, new_config, owner=owner)
+    kb = platform_detail_kb(platform, new_config)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -440,9 +434,7 @@ async def handle_toggle_field(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(lambda d: d.startswith("mplat:reset:") or d.startswith("dplat:reset:"))
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:reset:")))
 async def handle_reset_platform(
     callback: CallbackQuery,
     session_factory: Any,
@@ -456,7 +448,6 @@ async def handle_reset_platform(
     if len(parts) < 3:
         return
     platform = parts[2]
-    owner = _owner_from_data(data)
 
     if platform not in {"profiru", "kwork"}:
         return
@@ -465,10 +456,10 @@ async def handle_reset_platform(
     async with session_factory() as session:
         await set_platform_config(session, platform, default_config)
 
-    logger.info("Фильтры платформы %s сброшены к дефолту (owner=%s)", platform, owner)
+    logger.info("Фильтры платформы %s сброшены к дефолту", platform)
     await callback.answer("Фильтры сброшены.", show_alert=False)
     text = _platform_text(platform, default_config)
-    kb = platform_detail_kb(platform, default_config, owner=owner)
+    kb = platform_detail_kb(platform, default_config)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -519,9 +510,7 @@ _FIELD_TO_STATE: dict[str, Any] = {
 }
 
 
-@router.callback_query(
-    F.data.func(lambda d: d.startswith("mplat:edit:") or d.startswith("dplat:edit:"))
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:edit:")))
 async def handle_edit_field(
     callback: CallbackQuery,
     state: FSMContext,
@@ -532,11 +521,10 @@ async def handle_edit_field(
         return
     await callback.answer()
     data = callback.data or ""
-    # формат: {prefix}:edit:{platform}:{field}
+    # формат: plat:edit:{platform}:{field}
     parts = data.split(":")
     if len(parts) < 4:
         return
-    owner = _owner_from_data(data)
     platform = parts[2]
     field = parts[3]
 
@@ -547,23 +535,21 @@ async def handle_edit_field(
 
     prompt = _FIELD_PROMPTS.get(field, "Введите новое значение:")
     await state.set_state(fsm_state)
-    await state.update_data(platform=platform, field=field, owner=owner)
+    await state.update_data(platform=platform, field=field)
 
-    from src.bot.keyboards.platforms import platform_detail_kb
-    cancel_kb = _cancel_kb(owner, platform)
+    cancel_kb = _cancel_kb(platform)
     if callback.message:
         await callback.message.answer(prompt, reply_markup=cancel_kb)
 
 
-def _cancel_kb(owner: str, platform: str):
+def _cancel_kb(platform: str):
     """Клавиатура отмены ввода с возвратом на экран платформы."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    prefix = "mplat" if owner == "mgr" else "dplat"
     return InlineKeyboardMarkup(
         inline_keyboard=[[
             InlineKeyboardButton(
                 text="Отменить",
-                callback_data=f"{prefix}:open:{platform}",
+                callback_data=f"plat:open:{platform}",
             )
         ]]
     )
@@ -585,7 +571,6 @@ async def handle_input_budget(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "profiru")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     min_b: int | None = None
@@ -624,7 +609,7 @@ async def handle_input_budget(
     await state.clear()
     logger.info("Бюджет платформы %s обновлён: %s–%s", platform, min_b, max_b)
     await message.answer("Бюджет обновлён.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_age)
@@ -638,7 +623,6 @@ async def handle_input_age(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "profiru")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     value: int | None = None
@@ -659,7 +643,7 @@ async def handle_input_age(
     await state.clear()
     logger.info("max_age_hours платформы %s = %s", platform, value)
     await message.answer("Макс. возраст обновлён.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_min_age)
@@ -673,7 +657,6 @@ async def handle_input_min_age(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "profiru")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     value: int | None = None
@@ -694,7 +677,7 @@ async def handle_input_min_age(
     await state.clear()
     logger.info("min_age_seconds платформы %s = %s", platform, value)
     await message.answer("Мин. возраст обновлён.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_max_response_price)
@@ -708,7 +691,6 @@ async def handle_input_max_response_price(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "profiru")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     value: int | None = None
@@ -731,7 +713,7 @@ async def handle_input_max_response_price(
     await state.clear()
     logger.info("max_response_price платформы %s = %s", platform, value)
     await message.answer("Макс. цена отклика обновлена.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_min_hired_percent)
@@ -745,7 +727,6 @@ async def handle_input_min_hired_percent(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "kwork")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     value: int | None = None
@@ -768,7 +749,7 @@ async def handle_input_min_hired_percent(
     await state.clear()
     logger.info("min_hired_percent платформы %s = %s", platform, value)
     await message.answer("Мин. % найма обновлён.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_offers)
@@ -782,7 +763,6 @@ async def handle_input_offers(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "kwork")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     min_o: int | None = None
@@ -821,7 +801,7 @@ async def handle_input_offers(
     await state.clear()
     logger.info("offers диапазон платформы %s: %s–%s", platform, min_o, max_o)
     await message.answer("Диапазон откликов обновлён.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 @router.message(PlatformFilterStates.waiting_min_time_left_hours)
@@ -835,7 +815,6 @@ async def handle_input_min_time_left(
         return
     data = await state.get_data()
     platform: str = data.get("platform", "kwork")
-    owner: str = data.get("owner", "mgr")
     text = (message.text or "").strip()
 
     value: int | None = None
@@ -858,20 +837,19 @@ async def handle_input_min_time_left(
     await state.clear()
     logger.info("min_time_left_hours платформы %s = %s", platform, value)
     await message.answer("Мин. время до дедлайна обновлено.")
-    await _send_platform_detail(message, session_factory, platform, owner)
+    await _send_platform_detail(message, session_factory, platform)
 
 
 async def _send_platform_detail(
     message: Message,
     session_factory: Any,
     platform: str,
-    owner: str,
 ) -> None:
     """Отправить актуальный экран настроек платформы новым сообщением."""
     async with session_factory() as session:
         config = await get_platform_config(session, platform)
     text = _platform_text(platform, config)
-    kb = platform_detail_kb(platform, config, owner=owner)
+    kb = platform_detail_kb(platform, config)
     await message.answer(text, reply_markup=kb)
 
 
@@ -880,9 +858,7 @@ async def _send_platform_detail(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.in_({"mplat:kwork_cats:open", "dplat:kwork_cats:open"})
-)
+@router.callback_query(F.data == "plat:kwork_cats:open")
 async def handle_kwork_cats_open(
     callback: CallbackQuery,
     session_factory: Any,
@@ -892,7 +868,6 @@ async def handle_kwork_cats_open(
     if not await _check_access(callback, session_factory):
         return
     await callback.answer()
-    owner = _owner_from_data(callback.data or "")
 
     async with session_factory() as session:
         tree = await get_kwork_categories_tree(session)
@@ -900,10 +875,10 @@ async def handle_kwork_cats_open(
 
     selected = list(config.kwork.category_ids)
     # Сохраняем selected в FSM для накопления изменений
-    await state.update_data(kwork_selected=selected, kwork_parent_id=None, owner=owner)
+    await state.update_data(kwork_selected=selected, kwork_parent_id=None)
 
     text = "<b>Категории Kwork</b>\n\nВыберите нужные категории (чекбоксы). Нажмите «Сохранить»."
-    kb = kwork_categories_kb(tree, selected, owner=owner, parent_id=None)
+    kb = kwork_categories_kb(tree, selected, parent_id=None)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -913,11 +888,7 @@ async def handle_kwork_cats_open(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(
-        lambda d: d.startswith("mplat:kwork_cats:toggle:") or d.startswith("dplat:kwork_cats:toggle:")
-    )
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:kwork_cats:toggle:")))
 async def handle_kwork_cats_toggle(
     callback: CallbackQuery,
     session_factory: Any,
@@ -928,11 +899,10 @@ async def handle_kwork_cats_toggle(
         return
     await callback.answer()
     data = callback.data or ""
-    # формат: {prefix}:kwork_cats:toggle:{id}
+    # формат: plat:kwork_cats:toggle:{id}
     parts = data.split(":")
     if len(parts) < 4:
         return
-    owner = _owner_from_data(data)
 
     try:
         cat_id = int(parts[3])
@@ -954,7 +924,7 @@ async def handle_kwork_cats_toggle(
         tree = await get_kwork_categories_tree(session)
 
     text = "<b>Категории Kwork</b>\n\nВыберите нужные категории (чекбоксы). Нажмите «Сохранить»."
-    kb = kwork_categories_kb(tree, selected, owner=owner, parent_id=parent_id)
+    kb = kwork_categories_kb(tree, selected, parent_id=parent_id)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -964,11 +934,7 @@ async def handle_kwork_cats_toggle(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.func(
-        lambda d: d.startswith("mplat:kwork_cats:drill:") or d.startswith("dplat:kwork_cats:drill:")
-    )
-)
+@router.callback_query(F.data.func(lambda d: d.startswith("plat:kwork_cats:drill:")))
 async def handle_kwork_cats_drill(
     callback: CallbackQuery,
     session_factory: Any,
@@ -982,7 +948,6 @@ async def handle_kwork_cats_drill(
     parts = data.split(":")
     if len(parts) < 4:
         return
-    owner = _owner_from_data(data)
 
     try:
         raw_pid = int(parts[3])
@@ -1000,7 +965,7 @@ async def handle_kwork_cats_drill(
         tree = await get_kwork_categories_tree(session)
 
     text = "<b>Категории Kwork</b>\n\nВыберите нужные категории (чекбоксы). Нажмите «Сохранить»."
-    kb = kwork_categories_kb(tree, selected, owner=owner, parent_id=parent_id)
+    kb = kwork_categories_kb(tree, selected, parent_id=parent_id)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -1010,9 +975,7 @@ async def handle_kwork_cats_drill(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.in_({"mplat:kwork_cats:save", "dplat:kwork_cats:save"})
-)
+@router.callback_query(F.data == "plat:kwork_cats:save")
 async def handle_kwork_cats_save(
     callback: CallbackQuery,
     session_factory: Any,
@@ -1024,7 +987,6 @@ async def handle_kwork_cats_save(
     await callback.answer()
     fsm_data = await state.get_data()
     selected: list[int] = list(fsm_data.get("kwork_selected", []))
-    owner = _owner_from_data(callback.data or "")
     await state.clear()
 
     async with session_factory() as session:
@@ -1034,12 +996,12 @@ async def handle_kwork_cats_save(
         new_config = PlatformConfig.model_validate(config_dict)
         await set_platform_config(session, "kwork", new_config)
 
-    logger.info("Категории Kwork обновлены: %s (owner=%s)", selected, owner)
+    logger.info("Категории Kwork обновлены: %s", selected)
     await callback.answer(f"Категории сохранены ({len(selected)} шт.).", show_alert=False)
 
     # Вернуться на экран настроек Kwork
     text = _platform_text("kwork", new_config)
-    kb = platform_detail_kb("kwork", new_config, owner=owner)
+    kb = platform_detail_kb("kwork", new_config)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)
 
@@ -1049,9 +1011,7 @@ async def handle_kwork_cats_save(
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(
-    F.data.in_({"mplat:kwork_cats:refresh_tree", "dplat:kwork_cats:refresh_tree"})
-)
+@router.callback_query(F.data == "plat:kwork_cats:refresh_tree")
 async def handle_kwork_cats_refresh_tree(
     callback: CallbackQuery,
     session_factory: Any,
@@ -1065,7 +1025,6 @@ async def handle_kwork_cats_refresh_tree(
     if not await _check_access(callback, session_factory):
         return
     await callback.answer()
-    owner = _owner_from_data(callback.data or "")
 
     # TODO: попытаться загрузить из pykwork API:
     # from kwork import Kwork
@@ -1080,12 +1039,12 @@ async def handle_kwork_cats_refresh_tree(
         config = await get_platform_config(session, "kwork")
 
     selected = list(config.kwork.category_ids)
-    await state.update_data(kwork_selected=selected, kwork_parent_id=None, owner=owner)
+    await state.update_data(kwork_selected=selected, kwork_parent_id=None)
 
     logger.info("Дерево категорий Kwork обновлено (fallback, %d категорий)", len(tree))
     await callback.answer("Дерево категорий обновлено (IT fallback).", show_alert=True)
 
     text = "<b>Категории Kwork</b>\n\nВыберите нужные категории (чекбоксы). Нажмите «Сохранить»."
-    kb = kwork_categories_kb(tree, selected, owner=owner, parent_id=None)
+    kb = kwork_categories_kb(tree, selected, parent_id=None)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb)

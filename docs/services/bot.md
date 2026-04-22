@@ -1,6 +1,6 @@
 # Bot — Telegram бот (aiogram 3)
 
-> **Последнее обновление:** 2026-04-21 (v2.5 bugfix — анализ в DM, расширенная карточка группы, atomic group_message_id)
+> **Последнее обновление:** 2026-04-22 (рефакторинг platform_settings — унификация mplat/dplat → plat:*)
 > **ВАЖНО:** При любых изменениях в модуле `src/bot/` — обновить этот документ!
 
 ## v2.5 Bugfix — pmg:* handlers + расширенная карточка + atomic group_message_id (2026-04-21)
@@ -28,15 +28,17 @@
 - `handle_close_platforms` и `handle_edit_field` получили новый параметр `session_factory` в сигнатуре.
 - Примечание: `TeamMember` использует поле `tg_id` (не `telegram_id`), `is_admin` отсутствует в модели — использован только `role == TeamRole.manager`.
 
-## v2.5 Phase 4 — Глобальные фильтры платформ (2026-04-21)
+## v2.5 Phase 4 — Глобальные фильтры платформ (2026-04-21, рефакторинг 2026-04-22)
 
-- **Новый модуль `src/bot/keyboards/platforms.py`**: `platforms_list_kb`, `platform_detail_kb`, `kwork_categories_kb` — двухуровневый UI.
-- **Новый handler `src/bot/handlers/platform_settings.py`** (Router `platform_settings`):
-  - Callback-префиксы `mplat:*` (менеджер) и `dplat:*` (admin dev).
-  - Уровень 1: список платформ → `mplat:toggle:{platform}`, `mplat:open:{platform}`, `mplat:back`, `mplat:close`.
-  - Уровень 2: фильтры платформы → `mplat:edit:{platform}:{field}` (FSM), `mplat:toggle_field:{platform}:{field}`, `mplat:reset:{platform}`.
-  - Категории Kwork: `mplat:kwork_cats:open/toggle/drill/save/refresh_tree` + FSM multi-select.
+- **Модуль `src/bot/keyboards/platforms.py`**: `platforms_list_kb(profiru_enabled, kwork_enabled, *, back_cb)`, `platform_detail_kb(platform, config)`, `kwork_categories_kb(tree, selected, *, parent_id)` — двухуровневый UI. Параметр `owner` удалён, используется константа `_PREFIX = "plat"`.
+- **Handler `src/bot/handlers/platform_settings.py`** (Router `platform_settings`):
+  - Единый callback-префикс `plat:*` (было два: `mplat:*` и `dplat:*`).
+  - Entry points: `mgr:global_filters` (из панели менеджера) и `dev:global_filters` (из панели admin dev) — ловятся в `handle_open_global_filters`, определяют `back_cb` и сохраняют его в FSM под ключом `plat_back_cb`.
+  - Уровень 1: список платформ → `plat:toggle:{platform}`, `plat:open:{platform}`, `plat:back`, `plat:close`.
+  - Уровень 2: фильтры платформы → `plat:edit:{platform}:{field}` (FSM), `plat:toggle_field:{platform}:{field}`, `plat:reset:{platform}`.
+  - Категории Kwork: `plat:kwork_cats:open/toggle/drill/save/refresh_tree` + FSM multi-select.
   - Fallback IT-категорий (`_KWORK_IT_CATEGORIES_FALLBACK`) когда pykwork API не имеет `get_categories()`.
+  - Удалены: `_owner_from_data`, `_prefix_from_data`; параметр `owner` убран из всех функций.
 - **Новые FSM-состояния `PlatformFilterStates`** в `src/bot/states.py`: 7 состояний для ввода числовых/диапазонных значений фильтров.
 - **Интеграция в manager**: кнопка «Глобальные фильтры» (`mgr:global_filters`) добавлена в `manager_main_menu_kb`, per-user «Мои платформы» сохранена.
 - **Интеграция в dev**: кнопка «Глобальные фильтры» (`dev:global_filters`) добавлена в `dev_main_menu_kb` только для `is_admin=True`.
