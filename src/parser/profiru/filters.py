@@ -194,10 +194,20 @@ class ProfiruFilters:
         kwork_cfg = config.kwork
 
         # 3. Фильтр по категориям (если список непустой)
+        # Проект проходит если его подкатегория ИЛИ её корневая категория
+        # есть в списке. Это позволяет указать "11" (корневая "Разработка и IT")
+        # и пропускать все её подкатегории (41, 81, 255, …).
         if kwork_cfg.category_ids:
             cat_id = order.get("kwork_category_id")
-            if cat_id is not None and cat_id not in kwork_cfg.category_ids:
-                return False, f"Категория {cat_id} не в списке {kwork_cfg.category_ids}"
+            parent_id = order.get("kwork_parent_category_id")
+            allowed = set(kwork_cfg.category_ids)
+            in_sub = cat_id is not None and cat_id in allowed
+            in_parent = parent_id is not None and parent_id in allowed
+            if not (in_sub or in_parent):
+                return (
+                    False,
+                    f"Категория {cat_id} (parent={parent_id}) не в списке {kwork_cfg.category_ids}",
+                )
 
         # 4. Мин. % найма клиента
         if kwork_cfg.min_hired_percent is not None:
