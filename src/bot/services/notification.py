@@ -1,6 +1,8 @@
 """Воркер уведомлений: забирает проанализированные заявки из Redis и отправляет dev'ам в личку."""
 import asyncio
+import html
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -31,6 +33,27 @@ logger = logging.getLogger(__name__)
 
 
 _MSK = timezone(timedelta(hours=3))
+
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+# Только настоящие HTML-теги: начинаются с буквы или "/". Пропускаем выражения
+# типа "a < b & c > d" где < и > используются как символы.
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def _sanitize_for_html(text: str) -> str:
+    """Очистить произвольный текст для безопасной вставки в parse_mode=HTML.
+
+    Kwork/Profi.ru могут отдавать description с HTML-тегами (<br>, <p>, …)
+    которые TG Bot API не понимает и ломает парсинг. Снимаем все теги,
+    конвертим <br> в \\n и экранируем <>& на случай если текст сам содержит
+    символы которые TG примет за HTML.
+    """
+    if not text:
+        return ""
+    text = _BR_RE.sub("\n", text)
+    text = _HTML_TAG_RE.sub("", text)
+    text = html.unescape(text)
+    return html.escape(text)
 
 
 def _format_order_time(date_value) -> str:
@@ -192,9 +215,10 @@ def format_group_card(analyzed: dict) -> str:
     external_id = raw_external_id.lstrip("#")
 
     # Заголовок (полностью — обрезается только если > 200 симв.)
-    title = analyzed.get("title", "") or ""
-    if len(title) > 200:
-        title = title[:197] + "..."
+    raw_title = analyzed.get("title", "") or ""
+    if len(raw_title) > 200:
+        raw_title = raw_title[:197] + "..."
+    title = _sanitize_for_html(raw_title)
 
     # Бюджет клиента
     budget = analyzed.get("budget", "") or ""
@@ -202,14 +226,17 @@ def format_group_card(analyzed: dict) -> str:
     if not budget:
         budget_stated = analysis.get("client_budget_stated", False)
         budget = analysis.get("client_budget_text", "") if budget_stated else ""
+    budget = _sanitize_for_html(budget)
     budget_header = f"  |  💰 {budget}" if budget else ""
 
-    # Оригинал задачи (description / raw_text) — до 800 символов
-    description = (
+    # Оригинал задачи (description / raw_text) — до 800 символов.
+    # Санитайзим HTML: снимаем <br>, <p> и пр., которые TG Bot API не понимает.
+    raw_description = (
         analyzed.get("description")
         or analyzed.get("raw_text")
         or ""
     ).strip()
+    description = _sanitize_for_html(raw_description)
     if description:
         if len(description) > 800:
             description = description[:797] + "..."
@@ -217,10 +244,10 @@ def format_group_card(analyzed: dict) -> str:
     else:
         description_block = ""
 
-    # Формат работы + локация + когда (из getOrder Profi.ru)
-    work_format = (analyzed.get("work_format") or "").strip()
-    location = (analyzed.get("location") or "").strip()
-    schedule = (analyzed.get("schedule") or "").strip()
+    # Формат работы + локация + когда (из getOrder Profi.ru) — тоже санитайзим
+    work_format = _sanitize_for_html((analyzed.get("work_format") or "").strip())
+    location = _sanitize_for_html((analyzed.get("location") or "").strip())
+    schedule = _sanitize_for_html((analyzed.get("schedule") or "").strip())
     details_lines = []
     if work_format:
         if location and location != work_format:
@@ -234,12 +261,12 @@ def format_group_card(analyzed: dict) -> str:
     details_block = ("\n" + "\n".join(details_lines)) if details_lines else ""
 
     # AI-резюме
-    summary = (analysis.get("summary") or "").strip()
+    summary = _sanitize_for_html((analysis.get("summary") or "").strip())
     summary_block = f"\n\n<b>🤖 AI-резюме:</b> {summary}" if summary else ""
 
     # Стек
     stack_list = analysis.get("stack") or []
-    stack_str = ", ".join(stack_list) if stack_list else "—"
+    stack_str = _sanitize_for_html(", ".join(stack_list)) if stack_list else "—"
     stack_block = f"\n<b>💻 Стек:</b> {stack_str}"
 
     # Наша оценка (цена)
